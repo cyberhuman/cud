@@ -1,0 +1,10 @@
+(test
+ (name e2e)
+ (modules e2e vt pty)
+ (libraries unix)
+ (foreign_stubs
+  (language c)
+  (names pty_stubs))
+ (link_flags (-cclib -lutil))
+ (action
+  (setenv INE %{bin:ine} (run %{test}))))

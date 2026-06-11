@@ -1,0 +1,3 @@
+(library
+ (name ine_lib)
+ (libraries notty notty.lwt lwt lwt.unix))

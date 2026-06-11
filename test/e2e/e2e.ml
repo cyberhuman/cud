@@ -1,0 +1,471 @@
+(** End-to-end TUI tests: run the real [ine] binary on a pseudo-terminal,
+    send key sequences, and assert on the rendered screen and cursor
+    reconstructed by {!Vt}. *)
+
+let ine = Sys.getenv "INE"
+
+let failures = ref 0
+
+(* --- key sequences --- *)
+let ctrl c = String.make 1 (Char.chr (Char.code c land 0x1f))
+let up = "\x1b[A"
+let down = "\x1b[B"
+let right = "\x1b[C"
+let left = "\x1b[D"
+let home = "\x1b[H"
+let end_ = "\x1b[F"
+let pgup = "\x1b[5~"
+let pgdn = "\x1b[6~"
+let ctrl_right = "\x1b[1;5C"
+let meta_b = "\x1bb"
+let enter = "\r"
+
+type sess = {
+  master : Unix.file_descr;
+  pid : int;
+  vt : Vt.t;
+  transcript : Buffer.t;
+  name : string;
+}
+
+let spawn ?(w = 80) ?(h = 24) name shell_cmd =
+  let master, slave = Pty.openpty ~w ~h in
+  match Unix.fork () with
+  | 0 -> (
+      Unix.close master;
+      (try Pty.login_tty slave with _ -> exit 125);
+      let env =
+        [|
+          "TERM=xterm";
+          "PATH=" ^ Sys.getenv "PATH";
+          "HOME=" ^ (try Sys.getenv "HOME" with Not_found -> "/");
+          "LC_ALL=C.UTF-8";
+        |]
+      in
+      try Unix.execve "/bin/sh" [| "sh"; "-c"; shell_cmd |] env
+      with _ -> exit 126)
+  | pid ->
+      Unix.close slave;
+      { master; pid; vt = Vt.create ~w ~h; transcript = Buffer.create 8192; name }
+
+(* Read whatever output is available within [wait] seconds. *)
+let pump ?(wait = 0.05) sess =
+  let buf = Bytes.create 65536 in
+  let deadline = Unix.gettimeofday () +. wait in
+  let rec go () =
+    let timeout = max 0. (deadline -. Unix.gettimeofday ()) in
+    match Unix.select [ sess.master ] [] [] timeout with
+    | [], _, _ -> ()
+    | _ -> (
+        match Unix.read sess.master buf 0 (Bytes.length buf) with
+        | 0 -> ()
+        | n ->
+            let s = Bytes.sub_string buf 0 n in
+            Buffer.add_string sess.transcript s;
+            Vt.feed sess.vt s;
+            go ()
+        | exception Unix.Unix_error (Unix.EIO, _, _) -> () (* pty closed *))
+  in
+  go ()
+
+let fail sess what =
+  incr failures;
+  let x, y = Vt.cursor sess.vt in
+  Printf.printf "FAIL %s: %s\n--- screen (cursor %d,%d%s):\n%s\n" sess.name
+    what x y
+    (if Vt.cursor_visible sess.vt then "" else ", hidden")
+    (Vt.dump sess.vt)
+
+let wait_for ?(timeout = 10.) sess what pred =
+  let deadline = Unix.gettimeofday () +. timeout in
+  let rec go () =
+    pump sess;
+    if pred sess.vt then ()
+    else if Unix.gettimeofday () > deadline then fail sess ("timeout: " ^ what)
+    else go ()
+  in
+  go ()
+
+let send sess s =
+  ignore (Unix.write_substring sess.master s 0 (String.length s))
+
+let contains hay needle =
+  let nl = String.length needle and hl = String.length hay in
+  let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+  nl = 0 || go 0
+
+let expect_row sess y expected =
+  wait_for sess
+    (Printf.sprintf "row %d = %S" y expected)
+    (fun vt -> Vt.row_trim vt y = expected)
+
+let expect_row_contains sess y needle =
+  wait_for sess
+    (Printf.sprintf "row %d contains %S" y needle)
+    (fun vt -> contains (Vt.row_trim vt y) needle)
+
+let expect_some_row_contains sess needle =
+  wait_for sess
+    (Printf.sprintf "some row contains %S" needle)
+    (fun vt ->
+      List.exists
+        (fun y -> contains (Vt.row_trim vt y) needle)
+        (List.init vt.Vt.h Fun.id))
+
+let expect_status sess needle =
+  wait_for sess
+    (Printf.sprintf "status contains %S" needle)
+    (fun vt -> contains (Vt.row_trim vt (vt.Vt.h - 1)) needle)
+
+let expect_no_status sess needle =
+  pump sess ~wait:0.2;
+  let vt = sess.vt in
+  if contains (Vt.row_trim vt (vt.Vt.h - 1)) needle then
+    fail sess (Printf.sprintf "status unexpectedly contains %S" needle)
+
+let expect_cursor sess (x, y) =
+  wait_for sess
+    (Printf.sprintf "cursor at %d,%d (visible)" x y)
+    (fun vt -> Vt.cursor vt = (x, y) && Vt.cursor_visible vt)
+
+let wait_exit ?(timeout = 5.) sess =
+  let deadline = Unix.gettimeofday () +. timeout in
+  let rec go () =
+    pump sess;
+    match Unix.waitpid [ Unix.WNOHANG ] sess.pid with
+    | 0, _ ->
+        if Unix.gettimeofday () > deadline then begin
+          fail sess "timeout waiting for exit";
+          Unix.kill sess.pid Sys.sigkill;
+          ignore (Unix.waitpid [] sess.pid);
+          None
+        end
+        else go ()
+    | _, status -> Some status
+  in
+  let r = go () in
+  Unix.close sess.master;
+  r
+
+let expect_exit sess code =
+  match wait_exit sess with
+  | Some (Unix.WEXITED n) when n = code -> ()
+  | Some st ->
+      incr failures;
+      let show = function
+        | Unix.WEXITED n -> Printf.sprintf "exit %d" n
+        | Unix.WSIGNALED n -> Printf.sprintf "signal %d" n
+        | Unix.WSTOPPED n -> Printf.sprintf "stop %d" n
+      in
+      Printf.printf "FAIL %s: expected exit %d, got %s\n" sess.name code
+        (show st)
+  | None -> ()
+
+(* Plain text written after the TUI left the alternate screen — i.e. the
+   final printed arguments. *)
+let printed_after_release sess =
+  let s = Buffer.contents sess.transcript in
+  let marker = "\x1b[?1049l" in
+  let rec last_index from acc =
+    match String.index_from_opt s from '\x1b' with
+    | None -> acc
+    | Some i ->
+        let here =
+          if
+            i + String.length marker <= String.length s
+            && String.sub s i (String.length marker) = marker
+          then Some (i + String.length marker)
+          else None
+        in
+        last_index (i + 1) (match here with Some _ -> here | None -> acc)
+  in
+  match last_index 0 None with
+  | None -> ""
+  | Some start ->
+      (* strip remaining escape sequences with a scratch emulator-less scan *)
+      let b = Buffer.create 64 in
+      let n = String.length s in
+      let i = ref start in
+      while !i < n do
+        if s.[!i] = '\x1b' then begin
+          (* skip CSI/2-char escapes *)
+          if !i + 1 < n && s.[!i + 1] = '[' then begin
+            i := !i + 2;
+            while !i < n && not (s.[!i] >= '\x40' && s.[!i] <= '\x7e') do
+              incr i
+            done;
+            if !i < n then incr i
+          end
+          else i := !i + 2
+        end
+        else begin
+          Buffer.add_char b s.[!i];
+          incr i
+        end
+      done;
+      Buffer.contents b
+
+let quote = Filename.quote
+let json = {|{"a":1,"b":[1,2,3]}|}
+
+(* --- tests --- *)
+
+let test_jq_flow () =
+  let sess =
+    spawn "jq-flow"
+      (Printf.sprintf "printf %%s %s | %s --debounce 0.05 -i . jq" (quote json)
+         (quote ine))
+  in
+  (* startup layout: input on top, pretty-printed output, status bar *)
+  expect_row sess 0 "jq> .";
+  expect_row sess 1 "{";
+  expect_row sess 2 {|  "a": 1,|};
+  expect_row sess 3 {|  "b": [|};
+  expect_row sess 8 "}";
+  expect_status sess "exit 0";
+  expect_status sess "1-8/8";
+  expect_cursor sess (5, 0);
+
+  (* typing re-runs after the debounce *)
+  send sess "b";
+  expect_row sess 0 "jq> .b";
+  expect_row sess 1 "[";
+  expect_row sess 2 "  1,";
+  expect_row sess 5 "]";
+  expect_status sess "1-5/5";
+  expect_cursor sess (6, 0);
+
+  (* line editing: cursor moves, layout never shifts *)
+  send sess (ctrl 'a');
+  expect_cursor sess (4, 0);
+  send sess right;
+  expect_cursor sess (5, 0);
+  send sess (ctrl 'e');
+  expect_cursor sess (6, 0);
+  send sess (ctrl 'b');
+  expect_cursor sess (5, 0);
+  send sess home;
+  expect_cursor sess (4, 0);
+  send sess end_;
+  expect_cursor sess (6, 0);
+  send sess left;
+  expect_cursor sess (5, 0);
+  send sess right;
+  expect_cursor sess (6, 0);
+  expect_row sess 0 "jq> .b" (* the text itself did not change *);
+
+  (* multiple words: " -c" makes the output compact *)
+  send sess " -c";
+  expect_row sess 0 "jq> .b -c";
+  expect_cursor sess (9, 0);
+  expect_row sess 1 "[1,2,3]";
+  expect_status sess "1-1/1";
+
+  (* C-w kills the last word *)
+  send sess (ctrl 'w');
+  expect_row sess 0 "jq> .b";
+  expect_cursor sess (7, 0);
+  expect_status sess "1-5/5";
+
+  (* word motion *)
+  send sess meta_b;
+  expect_cursor sess (4, 0);
+  send sess ctrl_right;
+  expect_cursor sess (6, 0);
+
+  (* C-k kills to end of line *)
+  send sess (ctrl 'k');
+  expect_row sess 0 "jq> .b";
+  expect_cursor sess (6, 0);
+
+  (* C-u clears the line; bare jq defaults the filter to '.' *)
+  send sess (ctrl 'u');
+  expect_row sess 0 "jq>";
+  expect_cursor sess (4, 0);
+  expect_status sess "exit 0";
+  expect_status sess "1-8/8";
+
+  (* a broken filter: stderr is displayed, exit code shown *)
+  send sess "bogus";
+  expect_status sess "exit 3";
+  expect_some_row_contains sess "jq: error";
+  send sess (ctrl 'u');
+  expect_status sess "1-8/8";
+
+  (* unterminated quote is reported, fixed quote recovers *)
+  send sess "'";
+  expect_status sess "unterminated '";
+  send sess ".'";
+  expect_row sess 0 "jq> '.'";
+  expect_status sess "exit 0";
+  expect_no_status sess "unterminated";
+
+  (* single-arg mode toggle: a filter with spaces *)
+  send sess (ctrl 'u');
+  send sess ". | keys";
+  expect_row sess 0 "jq> . | keys";
+  expect_status sess "exit 2" (* split mode: "|" and "keys" treated as files *);
+  send sess (ctrl 't');
+  expect_status sess "[1 arg]";
+  expect_status sess "exit 0";
+  expect_row sess 1 "[";
+  expect_row_contains sess 2 {|"a"|};
+
+  (* accept: prints the args (quoted, since they contain spaces) *)
+  send sess (ctrl 'd');
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "'. | keys'") then begin
+    incr failures;
+    Printf.printf "FAIL jq-flow: printed args %S\n" printed
+  end
+
+let test_scroll_resize_cancel () =
+  let sess =
+    spawn "scroll" (Printf.sprintf "seq 1 50 | %s --debounce 0.05 cat" (quote ine))
+  in
+  expect_row sess 0 "cat>";
+  expect_row sess 1 "1";
+  expect_row sess 22 "22";
+  expect_status sess "exit 0";
+  expect_status sess "1-22/50";
+  expect_cursor sess (5, 0);
+
+  send sess down;
+  expect_row sess 1 "2";
+  expect_status sess "2-23/50";
+  send sess pgdn;
+  expect_row sess 1 "24";
+  expect_status sess "24-45/50";
+  send sess pgdn (* clamps at the bottom *);
+  expect_row sess 1 "29";
+  expect_row sess 22 "50";
+  expect_status sess "29-50/50";
+  send sess up;
+  expect_row sess 1 "28";
+  send sess pgup;
+  expect_row sess 1 "6";
+  send sess pgup;
+  expect_row sess 1 "1";
+  expect_status sess "1-22/50";
+
+  (* Home edits the input line, it does not scroll the output *)
+  send sess home;
+  expect_cursor sess (5, 0);
+  pump sess ~wait:0.2;
+  expect_row sess 1 "1";
+
+  (* resize: layout follows the new geometry (TIOCSWINSZ delivers SIGWINCH) *)
+  Pty.set_winsize sess.master ~w:100 ~h:30;
+  Vt.resize sess.vt ~w:100 ~h:30;
+  expect_row sess 0 "cat>";
+  expect_row sess 28 "28";
+  expect_status sess "1-28/50";
+  expect_cursor sess (5, 0);
+
+  send sess (ctrl 'c');
+  expect_exit sess 130
+
+let test_manual_mode () =
+  let sess =
+    spawn "manual"
+      (Printf.sprintf "printf %%s %s | %s -m jq" (quote json) (quote ine))
+  in
+  (* initial run: bare jq pretty-prints the whole input *)
+  expect_row sess 1 "{";
+  expect_status sess "1-8/8";
+  send sess ".a";
+  expect_row sess 0 "jq> .a";
+  (* no auto re-run in manual mode: output stays as it was *)
+  Unix.sleepf 0.7;
+  pump sess;
+  expect_row sess 1 "{";
+  expect_status sess "1-8/8";
+  (* Enter runs *)
+  send sess enter;
+  expect_row sess 1 "1";
+  expect_status sess "1-1/1";
+  send sess (ctrl 'd');
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed ".a") then begin
+    incr failures;
+    Printf.printf "FAIL manual: printed args %S\n" printed
+  end
+
+let test_fixed_args_and_lines_output () =
+  let sess =
+    spawn "echo"
+      (Printf.sprintf "printf '' | %s --debounce 0.05 -l -- echo hello"
+         (quote ine))
+  in
+  expect_row sess 0 "echo>";
+  expect_row sess 1 "hello";
+  send sess "world \"two words\"";
+  expect_row sess 1 "hello world two words";
+  send sess (ctrl 'd');
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "world\r\ntwo words") then begin
+    incr failures;
+    Printf.printf "FAIL echo: printed args %S\n" printed
+  end
+
+let test_null_output () =
+  let sess =
+    spawn "null"
+      (Printf.sprintf "printf '' | %s --debounce 0.05 -0 -- echo x" (quote ine))
+  in
+  expect_row sess 1 "x";
+  send sess "a b";
+  expect_row sess 1 "x a b";
+  send sess (ctrl 'd');
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "a\x00b\x00") then begin
+    incr failures;
+    Printf.printf "FAIL null: printed args %S\n" printed
+  end
+
+let test_command_output () =
+  let sess =
+    spawn "command"
+      (Printf.sprintf "printf '' | %s --debounce 0.05 -c -- echo hello"
+         (quote ine))
+  in
+  expect_row sess 1 "hello";
+  send sess "two words";
+  expect_row sess 1 "hello two words";
+  send sess (ctrl 'd');
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "echo hello two words") then begin
+    incr failures;
+    Printf.printf "FAIL command: printed %S\n" printed
+  end
+
+let () =
+  let tests =
+    [
+      ("jq-flow", test_jq_flow);
+      ("scroll-resize-cancel", test_scroll_resize_cancel);
+      ("manual-mode", test_manual_mode);
+      ("fixed-args-lines", test_fixed_args_and_lines_output);
+      ("null-output", test_null_output);
+      ("command-output", test_command_output);
+    ]
+  in
+  List.iter
+    (fun (name, f) ->
+      let before = !failures in
+      (try f ()
+       with exn ->
+         incr failures;
+         Printf.printf "FAIL %s: exception %s\n" name (Printexc.to_string exn));
+      if !failures = before then Printf.printf "PASS %s\n" name)
+    tests;
+  if !failures > 0 then begin
+    Printf.printf "%d e2e failure(s)\n" !failures;
+    exit 1
+  end
+  else print_endline "all e2e tests passed"
