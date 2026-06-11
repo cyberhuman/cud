@@ -1,4 +1,4 @@
 (executable
  (name main)
  (public_name ine)
- (libraries ine_lib cmdliner lwt.unix))
+ (libraries ine_lib cmdliner eio_main))

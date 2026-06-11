@@ -1,8 +1,15 @@
-(** Terminal shell: Notty rendering and the Lwt event loop around the pure
+(** Terminal shell: Notty rendering and the Eio event loop around the pure
     {!Model}. Keyboard input and drawing go through [/dev/tty], so stdin
-    stays free for the data being piped in. *)
+    stays free for the data being piped in.
 
-module Term = Notty_lwt.Term
+    Notty has no Eio backend, so we use [Notty_unix.Term] (plain blocking IO)
+    and bridge it ourselves: a dedicated system thread blocks in
+    [Term.event]/[select] and pushes events into an {!Eio.Stream} that the
+    main fiber consumes, alongside run-completion and debounce messages.
+    [SIGWINCH] is forwarded through a self-pipe so the event thread wakes up
+    no matter which thread the signal handler ran on. *)
+
+module Term = Notty_unix.Term
 
 type opts = {
   cmd : string;
@@ -24,8 +31,6 @@ type msg =
   | Run_done of int * Runner.outcome
   | Debounce of int
   | Events_closed
-
-let ( let* ) = Lwt.bind
 
 let read_all_stdin () =
   if Unix.isatty Unix.stdin then "" else In_channel.input_all In_channel.stdin
@@ -95,32 +100,94 @@ let key_of_event : Notty.Unescape.event -> Model.key option = function
   | `Key (`Escape, _) -> Some Model.Quit
   | _ -> None
 
-let run (opts : opts) : result Lwt.t =
+(* Blocking event reader, run on a dedicated system thread. Waits on the tty
+   and on the winch self-pipe; [push]es every event into the Eio stream. The
+   thread is not joined: it blocks in [read]/[select] until the process
+   exits. *)
+let event_thread term tty winch_r push =
+  let drain_buf = Bytes.create 64 in
+  let rec drain () =
+    match Unix.read winch_r drain_buf 0 (Bytes.length drain_buf) with
+    | _ -> drain ()
+    | exception
+        Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK | Unix.EINTR), _, _)
+      ->
+        ()
+  in
+  let rec go () =
+    let ev =
+      if Term.pending term then Some (Term.event term)
+      else
+        match Unix.select [ tty; winch_r ] [] [] (-1.0) with
+        | exception Unix.Unix_error (Unix.EINTR, _, _) ->
+            (* If the signal was handled on this thread, [Term.pending] picks
+               the resize up on the next iteration. *)
+            None
+        | rs, _, _ ->
+            if List.mem winch_r rs then begin
+              drain ();
+              (* Notty's own winch callback (same signal dispatch) updates the
+                 terminal size; a possibly-stale size here is harmless because
+                 the [`Resize] payload is ignored and [Term.pending] delivers a
+                 second resize once the flag is set. *)
+              Some (`Resize (Term.size term))
+            end
+            else if rs <> [] then Some (Term.event term)
+            else None
+    in
+    match ev with
+    | None -> go ()
+    | Some `End -> push Events_closed
+    | Some (#Notty.Unescape.event as e) ->
+        push (Event e);
+        go ()
+    | Some (`Resize _ as e) ->
+        push (Event e);
+        go ()
+  in
+  try go () with _ -> ( try push Events_closed with _ -> ())
+
+let run ~env (opts : opts) : result =
+  let proc_mgr = Eio.Stdenv.process_mgr env in
+  let clock = Eio.Stdenv.clock env in
   let input_data = read_all_stdin () in
-  let tty_unix = Unix.openfile "/dev/tty" [ Unix.O_RDWR ] 0 in
-  let tty = Lwt_unix.of_unix_file_descr tty_unix in
+  let tty = Unix.openfile "/dev/tty" [ Unix.O_RDWR ] 0 in
   let term = Term.create ~input:tty ~output:tty () in
-  let msgs, push_opt = Lwt_stream.create () in
-  let push m = push_opt (Some m) in
-  Lwt.async (fun () ->
-      let* () = Lwt_stream.iter (fun e -> push (Event e)) (Term.events term) in
-      push Events_closed;
-      Lwt.return_unit);
+  Eio.Switch.run @@ fun sw ->
+  (* [max_int] capacity: adds never block, so the event thread (which runs
+     outside any Eio scheduler) can push safely. *)
+  let msgs : msg Eio.Stream.t = Eio.Stream.create max_int in
+  let push m = Eio.Stream.add msgs m in
+
+  (* Self-pipe for SIGWINCH: the handler may run on any thread; the write
+     wakes the event thread's [select]. *)
+  let winch_r, winch_w = Unix.pipe ~cloexec:true () in
+  Unix.set_nonblock winch_r;
+  Unix.set_nonblock winch_w;
+  let winch_byte = Bytes.make 1 '!' in
+  let (`Revert _) =
+    Term.Winch.add tty (fun _dim ->
+        try ignore (Unix.write winch_w winch_byte 0 1) with _ -> ())
+  in
+  let _events : Thread.t =
+    Thread.create (fun () -> event_thread term tty winch_r push) ()
+  in
 
   let draw model =
     let w, h = Term.size term in
     let frame = Render.render ~w ~h model in
-    let* () = Term.image term (image_of_frame frame) in
+    Term.image term (image_of_frame frame);
     Term.cursor term frame.cursor
   in
 
   let schedule_debounce (model : Model.t) =
-    if opts.auto then
+    if opts.auto then begin
       let seq = model.edit_seq in
-      Lwt.async (fun () ->
-          let* () = Lwt_unix.sleep opts.debounce in
+      Eio.Fiber.fork_daemon ~sw (fun () ->
+          Eio.Time.sleep clock opts.debounce;
           push (Debounce seq);
-          Lwt.return_unit)
+          `Stop_daemon)
+    end
   in
 
   let start_run (model : Model.t) proc =
@@ -130,11 +197,12 @@ let run (opts : opts) : result Lwt.t =
         Option.iter (fun (p : Runner.handle) -> p.terminate ()) proc;
         let model = Model.start_run model in
         let gen = model.gen in
-        let handle = Runner.start ~cmd:model.cmd ~args ~input:input_data in
-        Lwt.async (fun () ->
-            let* outcome = handle.outcome in
-            push (Run_done (gen, outcome));
-            Lwt.return_unit);
+        let handle =
+          Runner.start ~sw ~proc_mgr ~cmd:model.cmd ~args ~input:input_data
+        in
+        Eio.Fiber.fork_daemon ~sw (fun () ->
+            push (Run_done (gen, Eio.Promise.await handle.outcome));
+            `Stop_daemon);
         (model, Some handle)
   in
 
@@ -151,19 +219,17 @@ let run (opts : opts) : result Lwt.t =
 
   let finish proc ~accepted model =
     Option.iter (fun (p : Runner.handle) -> p.terminate ()) proc;
-    let* () = Term.release term in
-    Lwt.return
-      {
-        accepted;
-        args = Model.user_args model;
-        command = Model.command_string model;
-      }
+    Term.release term;
+    {
+      accepted;
+      args = Model.user_args model;
+      command = Model.command_string model;
+    }
   in
 
   let rec loop (model : Model.t) proc =
-    let* () = draw model in
-    let* msg = Lwt_stream.next msgs in
-    match msg with
+    draw model;
+    match Eio.Stream.take msgs with
     | Events_closed -> finish proc ~accepted:false model
     | Event (`Resize _) -> loop model proc
     | Event (`Mouse _ | `Paste _) -> loop model proc
@@ -195,8 +261,8 @@ let run (opts : opts) : result Lwt.t =
   in
   (* Run once at startup so the output area is populated immediately. *)
   let model, proc = start_run model None in
-  Lwt.catch
-    (fun () -> loop model proc)
-    (fun exn ->
-      let* _ = finish proc ~accepted:false model in
-      Lwt.fail exn)
+  match loop model proc with
+  | result -> result
+  | exception exn ->
+      let _ = finish proc ~accepted:false model in
+      raise exn

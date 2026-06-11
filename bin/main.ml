@@ -29,7 +29,7 @@ let run ~initial ~manual ~debounce ~single ~output cmdline =
           single;
         }
       in
-      match Lwt_main.run (Ine_lib.Tui.run opts) with
+      match Eio_main.run (fun env -> Ine_lib.Tui.run ~env opts) with
       | { Ine_lib.Tui.accepted; args; command } ->
           print_args output args command;
           if accepted then 0 else 130

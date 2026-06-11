@@ -339,8 +339,12 @@ let render_invariants () =
 (* --- Runner (real processes) --- *)
 
 let runner_tests () =
+  Eio_main.run @@ fun env ->
+  let proc_mgr = Eio.Stdenv.process_mgr env in
   let run cmd args input =
-    Lwt_main.run (Runner.start ~cmd ~args ~input).Runner.outcome
+    Eio.Switch.run @@ fun sw ->
+    Eio.Promise.await
+      (Runner.start ~sw ~proc_mgr ~cmd ~args ~input).Runner.outcome
   in
   let outcome = run "sh" [ "-c"; "cat; echo oops >&2" ] "hello\nworld\n" in
   let texts =
@@ -362,11 +366,18 @@ let runner_tests () =
   let outcome = run "cat" [] big in
   check_int "runner.big-roundtrip" 20000 (Array.length outcome.Runner.lines);
 
-  let handle = Runner.start ~cmd:"sleep" ~args:[ "100" ] ~input:"" in
-  handle.Runner.terminate ();
-  let outcome = Lwt_main.run handle.Runner.outcome in
+  let outcome =
+    Eio.Switch.run @@ fun sw ->
+    let handle = Runner.start ~sw ~proc_mgr ~cmd:"sleep" ~args:[ "100" ] ~input:"" in
+    handle.Runner.terminate ();
+    Eio.Promise.await handle.Runner.outcome
+  in
   check "runner.terminated"
-    (match outcome.Runner.status with Model.Signaled _ -> true | _ -> false)
+    (match outcome.Runner.status with Model.Signaled _ -> true | _ -> false);
+
+  (* a nonexistent command reports an error instead of raising *)
+  let outcome = run "ine-no-such-command" [] "" in
+  check "runner.spawn-error" (outcome.Runner.status = Model.Exited 127)
 
 let () =
   editor_tests ();

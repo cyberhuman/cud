@@ -4,4 +4,4 @@
 (package
  (name ine)
  (synopsis "INteractive Executor: edit command arguments and re-run with captured stdin")
- (depends ocaml dune notty lwt cmdliner))
+ (depends ocaml dune notty eio eio_main cmdliner))
