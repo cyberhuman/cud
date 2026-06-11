@@ -1,0 +1,4 @@
+(executable
+ (name compare)
+ (modules compare zed_editor)
+ (libraries ine_lib zed))
