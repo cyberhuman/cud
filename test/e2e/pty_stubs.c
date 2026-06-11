@@ -8,7 +8,7 @@
 #include <caml/alloc.h>
 #include <caml/unixsupport.h>
 
-CAMLprim value ine_openpty(value vw, value vh)
+CAMLprim value cud_openpty(value vw, value vh)
 {
   CAMLparam2(vw, vh);
   CAMLlocal1(res);
@@ -25,7 +25,7 @@ CAMLprim value ine_openpty(value vw, value vh)
   CAMLreturn(res);
 }
 
-CAMLprim value ine_login_tty(value vfd)
+CAMLprim value cud_login_tty(value vfd)
 {
   if (login_tty(Int_val(vfd)) == -1)
     uerror("login_tty", Nothing);
@@ -34,7 +34,7 @@ CAMLprim value ine_login_tty(value vfd)
 
 /* Applying TIOCSWINSZ to the pty also delivers SIGWINCH to the foreground
    process group, like a real terminal resize. */
-CAMLprim value ine_set_winsize(value vfd, value vw, value vh)
+CAMLprim value cud_set_winsize(value vfd, value vw, value vh)
 {
   struct winsize ws;
   memset(&ws, 0, sizeof ws);

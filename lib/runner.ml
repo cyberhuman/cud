@@ -10,6 +10,9 @@ type handle = {
 
 let ( let* ) = Lwt.bind
 
+(** [input = None] means there was no piped stdin: the command's stdin is
+    closed right away (immediate EOF), so it can never try to read the
+    user's terminal. *)
 let start ~cmd ~args ~input : handle =
   let proc =
     Lwt_process.open_process_full (cmd, Array.of_list (cmd :: args))
@@ -30,13 +33,22 @@ let start ~cmd ~args ~input : handle =
     Lwt.catch go (fun _ -> Lwt.return_unit)
   in
   let feed_stdin () =
-    (* The command may exit without reading its input (EPIPE) — that's
-       fine. *)
-    Lwt.catch
-      (fun () ->
-        let* () = Lwt_io.write proc#stdin input in
-        Lwt_io.close proc#stdin)
-      (fun _ -> Lwt.catch (fun () -> Lwt_io.close proc#stdin) (fun _ -> Lwt.return_unit))
+    match input with
+    | None ->
+        Lwt.catch
+          (fun () -> Lwt_io.close proc#stdin)
+          (fun _ -> Lwt.return_unit)
+    | Some data ->
+        (* The command may exit without reading its input (EPIPE) — that's
+           fine. *)
+        Lwt.catch
+          (fun () ->
+            let* () = Lwt_io.write proc#stdin data in
+            Lwt_io.close proc#stdin)
+          (fun _ ->
+            Lwt.catch
+              (fun () -> Lwt_io.close proc#stdin)
+              (fun _ -> Lwt.return_unit))
   in
   let outcome =
     let* () =
@@ -57,7 +69,7 @@ let start ~cmd ~args ~input : handle =
       (fun exn ->
         Lwt.return
           {
-            lines = [| { Model.kind = Err; text = "ine: " ^ Printexc.to_string exn } |];
+            lines = [| { Model.kind = Err; text = "cud: " ^ Printexc.to_string exn } |];
             status = Model.Exited 127;
           })
   in

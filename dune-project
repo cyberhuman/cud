@@ -1,7 +1,7 @@
 (lang dune 3.8)
-(name ine)
+(name cud)
 
 (package
- (name ine)
- (synopsis "INteractive Executor: edit command arguments and re-run with captured stdin")
+ (name cud)
+ (synopsis "Chew your input again and again: edit command arguments and re-run with captured stdin")
  (depends ocaml dune notty lwt cmdliner))

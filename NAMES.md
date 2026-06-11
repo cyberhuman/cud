@@ -1,5 +1,7 @@
 # Name candidates
 
+**Chosen: `cud`** (2026-06-11).
+
 OCaml-themed (desert/camel/water — the tool re-pours the same stdin while you
 adjust the mechanism). All were unclaimed on opam as of 2026-06-11.
 

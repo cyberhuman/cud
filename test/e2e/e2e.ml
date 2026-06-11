@@ -1,8 +1,8 @@
-(** End-to-end TUI tests: run the real [ine] binary on a pseudo-terminal,
+(** End-to-end TUI tests: run the real [cud] binary on a pseudo-terminal,
     send key sequences, and assert on the rendered screen and cursor
     reconstructed by {!Vt}. *)
 
-let ine = Sys.getenv "INE"
+let cud = Sys.getenv "CUD"
 
 let failures = ref 0
 
@@ -214,7 +214,7 @@ let test_jq_flow () =
   let sess =
     spawn "jq-flow"
       (Printf.sprintf "printf %%s %s | %s --debounce 0.05 -i . jq" (quote json)
-         (quote ine))
+         (quote cud))
   in
   (* startup layout: input on top, pretty-printed output, status bar *)
   expect_row sess 0 "jq> .";
@@ -322,7 +322,7 @@ let test_jq_flow () =
 
 let test_scroll_resize_cancel () =
   let sess =
-    spawn "scroll" (Printf.sprintf "seq 1 50 | %s --debounce 0.05 cat" (quote ine))
+    spawn "scroll" (Printf.sprintf "seq 1 50 | %s --debounce 0.05 cat" (quote cud))
   in
   expect_row sess 0 "cat>";
   expect_row sess 1 "1";
@@ -369,7 +369,7 @@ let test_scroll_resize_cancel () =
 let test_manual_mode () =
   let sess =
     spawn "manual"
-      (Printf.sprintf "printf %%s %s | %s -m jq" (quote json) (quote ine))
+      (Printf.sprintf "printf %%s %s | %s -m jq" (quote json) (quote cud))
   in
   (* initial run: bare jq pretty-prints the whole input *)
   expect_row sess 1 "{";
@@ -397,7 +397,7 @@ let test_fixed_args_and_lines_output () =
   let sess =
     spawn "echo"
       (Printf.sprintf "printf '' | %s --debounce 0.05 -l -- echo hello"
-         (quote ine))
+         (quote cud))
   in
   expect_row sess 0 "echo>";
   expect_row sess 1 "hello";
@@ -414,7 +414,7 @@ let test_fixed_args_and_lines_output () =
 let test_null_output () =
   let sess =
     spawn "null"
-      (Printf.sprintf "printf '' | %s --debounce 0.05 -0 -- echo x" (quote ine))
+      (Printf.sprintf "printf '' | %s --debounce 0.05 -0 -- echo x" (quote cud))
   in
   expect_row sess 1 "x";
   send sess "a b";
@@ -431,7 +431,7 @@ let test_command_output () =
   let sess =
     spawn "command"
       (Printf.sprintf "printf '' | %s --debounce 0.05 -c -- echo hello"
-         (quote ine))
+         (quote cud))
   in
   expect_row sess 1 "hello";
   send sess "two words";
@@ -444,6 +444,97 @@ let test_command_output () =
     Printf.printf "FAIL command: printed %S\n" printed
   end
 
+let test_vim_mode () =
+  let sess =
+    spawn "vim"
+      (Printf.sprintf "printf %%s %s | %s --debounce 0.05 --vim -i .b jq"
+         (quote json) (quote cud))
+  in
+  expect_status sess "INSERT";
+  expect_row sess 0 "jq> .b";
+  expect_status sess "1-5/5";
+  expect_cursor sess (6, 0);
+  (* Esc enters normal mode, cursor steps back onto the last character *)
+  send sess "\x1b";
+  expect_status sess "NORMAL";
+  expect_cursor sess (5, 0);
+  send sess "0";
+  expect_cursor sess (4, 0);
+  send sess "$";
+  expect_cursor sess (5, 0);
+  (* x deletes under the cursor and the command re-runs *)
+  send sess "x";
+  expect_row sess 0 "jq> .";
+  expect_cursor sess (4, 0);
+  expect_status sess "1-8/8";
+  (* undo *)
+  send sess "u";
+  expect_row sess 0 "jq> .b";
+  expect_status sess "1-5/5";
+  (* A appends at end of line, back in insert mode *)
+  send sess "A";
+  expect_status sess "INSERT";
+  expect_cursor sess (6, 0);
+  send sess "\x04" (* C-d accepts even from insert mode *);
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed ".b") then begin
+    incr failures;
+    Printf.printf "FAIL vim: printed args %S\n" printed
+  end
+
+let test_vim_scroll () =
+  let sess =
+    spawn "vim-scroll"
+      (Printf.sprintf "seq 1 50 | %s --debounce 0.05 --vim cat" (quote cud))
+  in
+  expect_status sess "1-22/50";
+  send sess "\x1b";
+  expect_status sess "NORMAL";
+  send sess "j";
+  expect_status sess "2-23/50";
+  send sess "k";
+  expect_status sess "1-22/50";
+  send sess "G";
+  expect_status sess "29-50/50";
+  send sess "gg";
+  expect_status sess "1-22/50";
+  send sess "\x03" (* C-c cancels *);
+  expect_exit sess 130
+
+let test_no_command () =
+  let sess =
+    spawn "no-command"
+      (Printf.sprintf "printf %%s %s | %s --debounce 0.05" (quote json)
+         (quote cud))
+  in
+  (* no fixed command: bare prompt, a note instead of output *)
+  expect_row sess 0 ">";
+  expect_row sess 1 "(type a command to run)";
+  expect_cursor sess (2, 0);
+  send sess "jq .a";
+  expect_row sess 0 "> jq .a";
+  expect_row sess 1 "1";
+  expect_status sess "exit 0";
+  send sess (ctrl 'd');
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "jq .a") then begin
+    incr failures;
+    Printf.printf "FAIL no-command: printed args %S\n" printed
+  end
+
+let test_no_stdin () =
+  (* stdin is the terminal itself (nothing piped): the child must get
+     immediate EOF instead of hanging on our tty *)
+  let sess =
+    spawn "no-stdin" (Printf.sprintf "%s --debounce 0.05 cat" (quote cud))
+  in
+  expect_row sess 1 "(no output)";
+  expect_status sess "exit 0";
+  send sess (ctrl 'c');
+  expect_exit sess 130
+
 let () =
   let tests =
     [
@@ -453,6 +544,10 @@ let () =
       ("fixed-args-lines", test_fixed_args_and_lines_output);
       ("null-output", test_null_output);
       ("command-output", test_command_output);
+      ("vim-mode", test_vim_mode);
+      ("vim-scroll", test_vim_scroll);
+      ("no-command", test_no_command);
+      ("no-stdin", test_no_stdin);
     ]
   in
   List.iter

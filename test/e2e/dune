@@ -7,4 +7,4 @@
   (names pty_stubs))
  (link_flags (-cclib -lutil))
  (action
-  (setenv INE %{bin:ine} (run %{test}))))
+  (setenv CUD %{bin:cud} (run %{test}))))

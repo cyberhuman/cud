@@ -38,6 +38,19 @@ let to_uchars t = List.rev_append t.before t.after
 (** Cursor position, in characters from the start of the line. *)
 let cursor t = List.length t.before
 
+(** Same text, cursor at [pos] (clamped to the text). *)
+let with_cursor t pos =
+  let us = to_uchars t in
+  let pos = max 0 (min (List.length us) pos) in
+  let rec split i acc rest =
+    if i = 0 then { before = acc; after = rest }
+    else
+      match rest with
+      | [] -> { before = acc; after = [] }
+      | u :: tl -> split (i - 1) (u :: acc) tl
+  in
+  split pos [] us
+
 let length t = List.length t.before + List.length t.after
 let insert u t = { t with before = u :: t.before }
 

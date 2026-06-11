@@ -1,4 +1,4 @@
-open Ine_lib
+open Cud_lib
 
 let failures = ref 0
 
@@ -160,7 +160,7 @@ let model_tests () =
   | Model.Continue (m', _) ->
       check "model.parse-error"
         (m'.Model.parse_error = Some Shellwords.Unterminated_single_quote);
-      check "model.args-error" (Result.is_error (Model.args m'))
+      check "model.args-error" (Result.is_error (Model.command m'))
   | _ -> fail "model.parse-error" "unexpected reaction");
 
   (* run lifecycle: stale generations are ignored, empty output gets a note *)
@@ -185,7 +185,8 @@ let model_tests () =
     Model.create ~single:true ~cmd:"jq" ~fixed_args:[ "-r" ]
       ~initial:".x | .y" ()
   in
-  check "model.single-args" (Model.args s = Ok [ "-r"; ".x | .y" ]);
+  check "model.single-args"
+    (Model.command s = Ok (Some ("jq", [ "-r"; ".x | .y" ])));
   check "model.single-user-args" (Model.user_args s = [ ".x | .y" ]);
   check_str "model.single-command_string" "jq -r '.x | .y'"
     (Model.command_string s);
@@ -197,13 +198,23 @@ let model_tests () =
   let empty_single =
     Model.create ~single:true ~cmd:"jq" ~fixed_args:[] ~initial:"" ()
   in
-  check "model.single-empty-no-arg" (Model.args empty_single = Ok []);
+  check "model.single-empty-no-arg"
+    (Model.command empty_single = Ok (Some ("jq", [])));
   (match Model.handle_key ~view_h:5 s Model.Toggle_single with
   | Model.Continue (s', [ Model.Start_run ]) ->
       check "model.toggle-off" (not s'.Model.single);
       check "model.toggle-args-split"
-        (Model.args s' = Ok [ "-r"; ".x"; "|"; ".y" ])
+        (Model.command s' = Ok (Some ("jq", [ "-r"; ".x"; "|"; ".y" ])))
   | _ -> fail "model.toggle" "Toggle_single should request Start_run");
+
+  (* no fixed command: the line itself is the command *)
+  let nc = Model.create ~fixed_args:[] ~initial:"" () in
+  check "model.nocmd-empty" (Model.command nc = Ok None);
+  let nc = { nc with Model.editor = Editor.of_string "jq .a" } in
+  check "model.nocmd-split" (Model.command nc = Ok (Some ("jq", [ ".a" ])));
+  let ncs = Model.create ~single:true ~fixed_args:[] ~initial:"jq .a | cat" () in
+  check "model.nocmd-single-sh"
+    (Model.command ncs = Ok (Some ("sh", [ "-c"; "jq .a | cat" ])));
 
   (* user_args in split mode: parsed words; unparseable line passed as-is *)
   let m = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"-r '.a'" () in
@@ -218,6 +229,129 @@ let model_tests () =
   check_str "model.command_string" "jq -r .x '|' .y" (Model.command_string m);
   let m = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"'.x | .y'" () in
   check_str "model.command_string-quoted" "jq '.x | .y'" (Model.command_string m)
+
+(* --- Vim mode --- *)
+
+let vim_tests () =
+  let esc = Model.I_special Model.S_escape in
+  let chars s =
+    List.init (String.length s) (fun i -> Model.I_char (Uchar.of_char s.[i]))
+  in
+  let apply m inputs =
+    List.fold_left
+      (fun m i ->
+        match Model.handle_input ~view_h:5 m i with
+        | Model.Continue (m', _) -> m'
+        | _ -> m)
+      m inputs
+  in
+  let mk initial =
+    Model.create ~vim:true ~cmd:"jq" ~fixed_args:[] ~initial ()
+  in
+  let text m = Editor.to_string m.Model.editor in
+  let cur m = Editor.cursor m.Model.editor in
+
+  (* starts in insert mode; Esc enters normal and steps back one column *)
+  let m = mk "hello world" in
+  check "vim.starts-insert" (m.Model.vmode = Model.V_insert);
+  let n = apply m [ esc ] in
+  check "vim.esc-normal" (n.Model.vmode = Model.V_normal);
+  check_int "vim.esc-cursor" 10 (cur n);
+
+  (* motions *)
+  check_int "vim.0" 0 (cur (apply n (chars "0")));
+  check_int "vim.dollar" 10 (cur (apply n (chars "0$")));
+  check_int "vim.h-clamp" 0 (cur (apply n (chars "0h")));
+  check_int "vim.l" 1 (cur (apply n (chars "0l")));
+  check_int "vim.w" 6 (cur (apply n (chars "0w")));
+  check_int "vim.e" 4 (cur (apply n (chars "0e")));
+  check_int "vim.b" 0 (cur (apply n (chars "0wb")));
+  check_int "vim.f" 4 (cur (apply n (chars "0fo;"))) (* ';' ignored *);
+  check_int "vim.F" 7 (cur (apply n (chars "$Fo")));
+
+  (* x deletes under cursor into the register *)
+  let d = apply n (chars "0x") in
+  check_str "vim.x" "ello world" (text d);
+  check_str "vim.x-register" "h" d.Model.register;
+
+  (* undo / redo *)
+  let u = apply d (chars "u") in
+  check_str "vim.undo" "hello world" (text u);
+  let r = apply u [ Model.I_ctrl 'r' ] in
+  check_str "vim.redo" "ello world" (text r);
+
+  (* operator + motion *)
+  let dw = apply n (chars "0dw") in
+  check_str "vim.dw" "world" (text dw);
+  check_str "vim.dw-register" "hello " dw.Model.register;
+  let p = apply dw (chars "P") in
+  check_str "vim.P" "hello world" (text p);
+  check_int "vim.P-cursor" 5 (cur p);
+  let cw = apply n (chars "0cw") in
+  check_str "vim.cw" " world" (text cw);
+  check_str "vim.cw-register" "hello" cw.Model.register;
+  check "vim.cw-insert" (cw.Model.vmode = Model.V_insert);
+  let dfo = apply n (chars "0dfo") in
+  check_str "vim.dfo" " world" (text dfo);
+  let dd = apply n (chars "dd") in
+  check_str "vim.dd" "" (text dd);
+  check_str "vim.dd-register" "hello world" dd.Model.register;
+  let pp = apply dd (chars "p") in
+  check_str "vim.p-empty" "hello world" (text pp);
+
+  (* r, D, C, s, X *)
+  check_str "vim.r" "Xello world" (text (apply n (chars "0rX")));
+  let big_d = apply n (chars "0wD") in
+  check_str "vim.D" "hello " (text big_d);
+  check_int "vim.D-cursor" 5 (cur big_d);
+  let c = apply n (chars "0wC") in
+  check "vim.C-insert" (c.Model.vmode = Model.V_insert);
+  check_str "vim.C" "hello " (text c);
+  check_str "vim.X" "ello world" (text (apply n (chars "0lX")));
+  let s = apply n (chars "0s") in
+  check_str "vim.s" "ello world" (text s);
+  check "vim.s-insert" (s.Model.vmode = Model.V_insert);
+
+  (* insert transitions *)
+  let a = apply n (chars "0a") in
+  check "vim.a-insert" (a.Model.vmode = Model.V_insert);
+  check_int "vim.a-cursor" 1 (cur a);
+  check_int "vim.A-cursor" 11 (cur (apply n (chars "A")));
+  check_int "vim.I-cursor" 0 (cur (apply n (chars "$I")));
+  let edited = apply n (chars "A!") in
+  check_str "vim.A-type" "hello world!" (text edited);
+
+  (* scrolling in normal mode *)
+  let n30 = with_lines 30 (apply (mk "") [ esc ]) in
+  check_int "vim.j" 1 (apply n30 (chars "j")).Model.scroll;
+  check_int "vim.G" 25 (apply n30 (chars "G")).Model.scroll;
+  check_int "vim.gg" 0 (apply n30 (chars "Ggg")).Model.scroll;
+  check_int "vim.k" 0 (apply n30 (chars "jk")).Model.scroll;
+
+  (* exits: Esc never quits in vim mode; C-c and C-d still do *)
+  check "vim.esc-no-quit"
+    (match Model.handle_input ~view_h:5 n esc with
+    | Model.Continue _ -> true
+    | _ -> false);
+  check "vim.ctrl-c-quit"
+    (Model.handle_input ~view_h:5 n (Model.I_ctrl 'c') = Model.Quit_exit);
+  check "vim.ctrl-d-accept"
+    (Model.handle_input ~view_h:5 n (Model.I_ctrl 'd') = Model.Accept_exit);
+  check "vim.normal-enter-runs"
+    (match Model.handle_input ~view_h:5 n (Model.I_special Model.S_enter) with
+    | Model.Continue (_, [ Model.Start_run ]) -> true
+    | _ -> false);
+
+  (* edits schedule re-runs *)
+  check "vim.x-schedules-rerun"
+    (match Model.handle_input ~view_h:5 n (Model.I_char (Uchar.of_char 'x')) with
+    | Model.Continue (_, [ Model.Schedule_rerun ]) -> true
+    | _ -> false);
+
+  (* without --vim, Escape still quits *)
+  let plain = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"" () in
+  check "vim.disabled-esc-quits"
+    (Model.handle_input ~view_h:5 plain esc = Model.Quit_exit)
 
 (* --- Render --- *)
 
@@ -342,7 +476,9 @@ let runner_tests () =
   let run cmd args input =
     Lwt_main.run (Runner.start ~cmd ~args ~input).Runner.outcome
   in
-  let outcome = run "sh" [ "-c"; "cat; echo oops >&2" ] "hello\nworld\n" in
+  let outcome =
+    run "sh" [ "-c"; "cat; echo oops >&2" ] (Some "hello\nworld\n")
+  in
   let texts =
     Array.to_list outcome.Runner.lines |> List.map (fun l -> l.Model.text)
   in
@@ -353,16 +489,22 @@ let runner_tests () =
        outcome.Runner.lines);
   check "runner.exit0" (outcome.Runner.status = Model.Exited 0);
 
-  let outcome = run "sh" [ "-c"; "exit 3" ] "ignored input" in
+  let outcome = run "sh" [ "-c"; "exit 3" ] (Some "ignored input") in
   check "runner.exit3" (outcome.Runner.status = Model.Exited 3);
+
+  (* no piped stdin: the child sees immediate EOF, it can never hang *)
+  let outcome = run "cat" [] None in
+  check_str "runner.no-stdin-eof" "(0 lines)"
+    (Printf.sprintf "(%d lines)" (Array.length outcome.Runner.lines));
+  check "runner.no-stdin-exit0" (outcome.Runner.status = Model.Exited 0);
 
   (* a command that never reads its input must not deadlock, and large
      input must not deadlock the writer while output is pending *)
   let big = String.concat "" (List.init 20000 (fun i -> Printf.sprintf "%d\n" i)) in
-  let outcome = run "cat" [] big in
+  let outcome = run "cat" [] (Some big) in
   check_int "runner.big-roundtrip" 20000 (Array.length outcome.Runner.lines);
 
-  let handle = Runner.start ~cmd:"sleep" ~args:[ "100" ] ~input:"" in
+  let handle = Runner.start ~cmd:"sleep" ~args:[ "100" ] ~input:None in
   handle.Runner.terminate ();
   let outcome = Lwt_main.run handle.Runner.outcome in
   check "runner.terminated"
@@ -372,6 +514,7 @@ let () =
   editor_tests ();
   shellwords_tests ();
   model_tests ();
+  vim_tests ();
   render_tests ();
   render_invariants ();
   runner_tests ();

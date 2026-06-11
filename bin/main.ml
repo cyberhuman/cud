@@ -3,7 +3,7 @@ let print_args mode args command =
   | `Quiet -> ()
   | `Quoted ->
       print_endline
-        (String.concat " " (List.map Ine_lib.Shellwords.quote_word args))
+        (String.concat " " (List.map Cud_lib.Shellwords.quote_word args))
   | `Lines -> List.iter print_endline args
   | `Null ->
       List.iter
@@ -13,29 +13,30 @@ let print_args mode args command =
         args
   | `Command -> print_endline command
 
-let run ~initial ~manual ~debounce ~single ~output cmdline =
-  match cmdline with
-  | [] -> 2 (* unreachable: the positional argument list is non-empty *)
-  | cmd :: fixed_args -> (
-      (* The command may exit without reading the input we replay to it. *)
-      Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
-      let opts =
-        {
-          Ine_lib.Tui.cmd;
-          fixed_args;
-          initial;
-          auto = not manual;
-          debounce;
-          single;
-        }
-      in
-      match Lwt_main.run (Ine_lib.Tui.run opts) with
-      | { Ine_lib.Tui.accepted; args; command } ->
-          print_args output args command;
-          if accepted then 0 else 130
-      | exception Unix.Unix_error (err, fn, _) ->
-          Printf.eprintf "ine: %s: %s\n" fn (Unix.error_message err);
-          1)
+let run ~initial ~manual ~debounce ~single ~vim ~output cmdline =
+  let cmd, fixed_args =
+    match cmdline with [] -> (None, []) | cmd :: rest -> (Some cmd, rest)
+  in
+  (* The command may exit without reading the input we replay to it. *)
+  Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
+  let opts =
+    {
+      Cud_lib.Tui.cmd;
+      fixed_args;
+      initial;
+      auto = not manual;
+      debounce;
+      single;
+      vim;
+    }
+  in
+  match Lwt_main.run (Cud_lib.Tui.run opts) with
+  | { Cud_lib.Tui.accepted; args; command } ->
+      print_args output args command;
+      if accepted then 0 else 130
+  | exception Unix.Unix_error (err, fn, _) ->
+      Printf.eprintf "cud: %s: %s\n" fn (Unix.error_message err);
+      1
 
 open Cmdliner
 
@@ -88,13 +89,23 @@ let output =
                  shell-quoted and ready to execute." );
         ])
 
+let vim =
+  Arg.(
+    value & flag
+    & info [ "vim" ]
+        ~doc:
+          "Vim keybindings: Escape switches between insert and normal mode \
+           (motions, d/c operators, x, r, p, u, j/k scrolling, ...).")
+
 let cmdline =
   Arg.(
-    non_empty & pos_all string []
+    value & pos_all string []
     & info [] ~docv:"CMD"
         ~doc:
           "Command to run, with optional fixed arguments. Put $(b,--) before \
-           it if it starts with a dash.")
+           it if it starts with a dash. With no command at all, the input \
+           line itself is the command line (run with $(b,sh -c) in \
+           single-argument mode).")
 
 let cmd =
   let doc = "interactively edit a command's arguments and re-run it" in
@@ -106,7 +117,7 @@ let cmd =
          full-screen UI: the top line edits extra arguments (appended after \
          the fixed ones), the rest of the screen shows the command's output. \
          Every run is fed the captured input again.";
-      `P "Example: $(b,swaymsg -t get_outputs | ine jq)";
+      `P "Example: $(b,swaymsg -t get_outputs | cud jq)";
       `P
         "On exit the arguments from the editor are printed to stdout \
          (shell-quoted by default; see $(b,--quiet), $(b,--lines), \
@@ -122,10 +133,11 @@ let cmd =
     and+ manual
     and+ debounce
     and+ single
+    and+ vim
     and+ output
     and+ cmdline in
-    run ~initial ~manual ~debounce ~single ~output cmdline
+    run ~initial ~manual ~debounce ~single ~vim ~output cmdline
   in
-  Cmd.v (Cmd.info "ine" ~doc ~man) term
+  Cmd.v (Cmd.info "cud" ~doc ~man) term
 
 let () = exit (Cmd.eval' cmd)

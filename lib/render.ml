@@ -5,7 +5,15 @@
     has exactly [h] rows and every row exactly [w] columns (counting Unicode
     characters as one column each), so the layout can never shift. *)
 
-type style = Prompt | Input | Out_text | Err_text | Info_text | Bar | Bar_alert
+type style =
+  | Prompt
+  | Input
+  | Out_text
+  | Err_text
+  | Info_text
+  | Bar
+  | Bar_alert
+  | Bar_mode
 type seg = style * string
 
 type frame = {
@@ -99,7 +107,9 @@ let style_of_kind = function
   | Model.Info -> Info_text
 
 let input_row ~w (m : Model.t) =
-  let prompt = sanitize_flat (m.cmd ^ "> ") in
+  let prompt =
+    sanitize_flat (match m.cmd with Some c -> c ^ "> " | None -> "> ")
+  in
   (* Keep at least one column for the text on absurdly narrow terminals. *)
   let plen = min (ulength prompt) (max 0 (w - 1)) in
   let prompt = usub prompt 0 plen in
@@ -139,9 +149,13 @@ let status_row ~w ~view_h (m : Model.t) =
     if count = 0 then ""
     else Printf.sprintf "%d-%d/%d  " (scroll + 1) (min count (scroll + view_h)) count
   in
+  let vim_mode =
+    if not m.vim then ""
+    else match m.vmode with Model.V_normal -> " NORMAL " | Model.V_insert -> " INSERT "
+  in
   let mode = if m.single then " [1 arg] " else "" in
   let hints = "enter run · ^D accept · esc quit " in
-  let leftw = ulength state + ulength parse + ulength mode in
+  let leftw = ulength vim_mode + ulength state + ulength parse + ulength mode in
   (* Right-hand side: drop the hints, then the range, as space runs out. *)
   let right =
     List.find_opt
@@ -153,6 +167,7 @@ let status_row ~w ~view_h (m : Model.t) =
   let segs =
     if mid >= 0 then
       [
+        (Bar_mode, vim_mode);
         ((if state_alert then Bar_alert else Bar), state);
         (Bar_alert, parse);
         (Bar, mode);
@@ -161,8 +176,9 @@ let status_row ~w ~view_h (m : Model.t) =
     else
       (* Too narrow even for the left part: crop it. *)
       [
-        ((if state_alert then Bar_alert else Bar), fit w state);
-        (Bar_alert, fit (max 0 (w - ulength state)) parse);
+        (Bar_mode, fit (min w (ulength vim_mode)) vim_mode);
+        ( (if state_alert then Bar_alert else Bar),
+          fit (max 0 (w - ulength vim_mode)) state );
       ]
   in
   (* Normalize: drop empty segments, enforce exact width. *)

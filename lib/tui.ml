@@ -5,12 +5,13 @@
 module Term = Notty_lwt.Term
 
 type opts = {
-  cmd : string;
+  cmd : string option;  (** [None]: the input line is the whole command *)
   fixed_args : string list;
   initial : string;
   auto : bool;  (** re-run automatically after edits *)
   debounce : float;  (** seconds to wait after the last edit *)
   single : bool;  (** start in single-argument mode *)
+  vim : bool;  (** vim keybindings *)
 }
 
 type result = {
@@ -28,7 +29,8 @@ type msg =
 let ( let* ) = Lwt.bind
 
 let read_all_stdin () =
-  if Unix.isatty Unix.stdin then "" else In_channel.input_all In_channel.stdin
+  if Unix.isatty Unix.stdin then None
+  else Some (In_channel.input_all In_channel.stdin)
 
 let attr_of_style =
   let open Notty.A in
@@ -40,6 +42,7 @@ let attr_of_style =
   | Render.Info_text -> fg (gray 10)
   | Render.Bar -> st reverse
   | Render.Bar_alert -> fg red ++ st reverse ++ st bold
+  | Render.Bar_mode -> fg yellow ++ st reverse ++ st bold
 
 let image_of_frame (frame : Render.frame) =
   let open Notty in
@@ -50,49 +53,32 @@ let image_of_frame (frame : Render.frame) =
          |> I.hcat)
   |> I.vcat
 
-let key_of_event : Notty.Unescape.event -> Model.key option = function
-  | `Key (`ASCII c, mods) when List.mem `Ctrl mods -> (
-      match Char.lowercase_ascii c with
-      | 'a' -> Some Model.Home
-      | 'e' -> Some Model.End
-      | 'b' -> Some Model.Left
-      | 'f' -> Some Model.Right
-      | 'k' -> Some Model.Kill_to_end
-      | 'u' -> Some Model.Kill_to_start
-      | 'w' -> Some Model.Kill_prev_word
-      | 'p' -> Some Model.Scroll_up
-      | 'n' -> Some Model.Scroll_down
-      | 'l' -> Some Model.Redraw
-      | 't' -> Some Model.Toggle_single
-      | 'd' -> Some Model.Accept
-      | 'c' -> Some Model.Quit
-      | _ -> None)
-  | `Key (`ASCII c, mods) when List.mem `Meta mods -> (
-      match Char.lowercase_ascii c with
-      | 'b' -> Some Model.Word_left
-      | 'f' -> Some Model.Word_right
-      | _ -> None)
-  | `Key (`ASCII c, _) -> Some (Model.Insert (Uchar.of_char c))
+let input_of_event : Notty.Unescape.event -> Model.input option = function
+  | `Key (`ASCII c, mods) when List.mem `Ctrl mods ->
+      Some (Model.I_ctrl (Char.lowercase_ascii c))
+  | `Key (`ASCII c, mods) when List.mem `Meta mods ->
+      Some (Model.I_meta (Char.lowercase_ascii c))
+  | `Key (`ASCII c, _) -> Some (Model.I_char (Uchar.of_char c))
   | `Key (`Uchar u, mods) when not (List.mem `Ctrl mods) ->
-      Some (Model.Insert u)
-  | `Key (`Enter, _) -> Some Model.Enter
-  | `Key (`Backspace, _) -> Some Model.Backspace
-  | `Key (`Delete, _) -> Some Model.Delete
+      Some (Model.I_char u)
+  | `Key (`Enter, _) -> Some (Model.I_special Model.S_enter)
+  | `Key (`Backspace, _) -> Some (Model.I_special Model.S_backspace)
+  | `Key (`Delete, _) -> Some (Model.I_special Model.S_delete)
   | `Key (`Arrow `Left, mods) when List.mem `Ctrl mods || List.mem `Meta mods
     ->
-      Some Model.Word_left
+      Some (Model.I_special Model.S_ctrl_left)
   | `Key (`Arrow `Right, mods) when List.mem `Ctrl mods || List.mem `Meta mods
     ->
-      Some Model.Word_right
-  | `Key (`Arrow `Left, _) -> Some Model.Left
-  | `Key (`Arrow `Right, _) -> Some Model.Right
-  | `Key (`Arrow `Up, _) -> Some Model.Scroll_up
-  | `Key (`Arrow `Down, _) -> Some Model.Scroll_down
-  | `Key (`Home, _) -> Some Model.Home
-  | `Key (`End, _) -> Some Model.End
-  | `Key (`Page `Up, _) -> Some Model.Page_up
-  | `Key (`Page `Down, _) -> Some Model.Page_down
-  | `Key (`Escape, _) -> Some Model.Quit
+      Some (Model.I_special Model.S_ctrl_right)
+  | `Key (`Arrow `Left, _) -> Some (Model.I_special Model.S_left)
+  | `Key (`Arrow `Right, _) -> Some (Model.I_special Model.S_right)
+  | `Key (`Arrow `Up, _) -> Some (Model.I_special Model.S_up)
+  | `Key (`Arrow `Down, _) -> Some (Model.I_special Model.S_down)
+  | `Key (`Home, _) -> Some (Model.I_special Model.S_home)
+  | `Key (`End, _) -> Some (Model.I_special Model.S_end)
+  | `Key (`Page `Up, _) -> Some (Model.I_special Model.S_pgup)
+  | `Key (`Page `Down, _) -> Some (Model.I_special Model.S_pgdn)
+  | `Key (`Escape, _) -> Some (Model.I_special Model.S_escape)
   | _ -> None
 
 let run (opts : opts) : result Lwt.t =
@@ -124,13 +110,17 @@ let run (opts : opts) : result Lwt.t =
   in
 
   let start_run (model : Model.t) proc =
-    match Model.args model with
+    match Model.command model with
     | Error _ -> (model, proc) (* shown in the status bar; keep the old run *)
-    | Ok args ->
+    | Ok None ->
+        (* nothing to run: kill any in-flight run, show a note *)
+        Option.iter (fun (p : Runner.handle) -> p.terminate ()) proc;
+        (Model.set_idle model ~note:"(type a command to run)", None)
+    | Ok (Some (prog, args)) ->
         Option.iter (fun (p : Runner.handle) -> p.terminate ()) proc;
         let model = Model.start_run model in
         let gen = model.gen in
-        let handle = Runner.start ~cmd:model.cmd ~args ~input:input_data in
+        let handle = Runner.start ~cmd:prog ~args ~input:input_data in
         Lwt.async (fun () ->
             let* outcome = handle.outcome in
             push (Run_done (gen, outcome));
@@ -168,11 +158,11 @@ let run (opts : opts) : result Lwt.t =
     | Event (`Resize _) -> loop model proc
     | Event (`Mouse _ | `Paste _) -> loop model proc
     | Event (`Key _ as event) -> (
-        match key_of_event event with
+        match input_of_event event with
         | None -> loop model proc
-        | Some key -> (
+        | Some input -> (
             let view_h = max 1 (snd (Term.size term) - 2) in
-            match Model.handle_key ~view_h model key with
+            match Model.handle_input ~view_h model input with
             | Model.Quit_exit -> finish proc ~accepted:false model
             | Model.Accept_exit -> finish proc ~accepted:true model
             | Model.Continue (model, effects) ->
@@ -190,7 +180,7 @@ let run (opts : opts) : result Lwt.t =
   in
 
   let model =
-    Model.create ~single:opts.single ~cmd:opts.cmd
+    Model.create ?cmd:opts.cmd ~single:opts.single ~vim:opts.vim
       ~fixed_args:opts.fixed_args ~initial:opts.initial ()
   in
   (* Run once at startup so the output area is populated immediately. *)
