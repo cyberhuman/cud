@@ -30,7 +30,7 @@ let run ~initial ~manual ~debounce ~single ~vim ~output cmdline =
       vim;
     }
   in
-  match Lwt_main.run (Cud_lib.Tui.run opts) with
+  match Eio_main.run (fun env -> Cud_lib.Tui.run ~env opts) with
   | { Cud_lib.Tui.accepted; args; command } ->
       print_args output args command;
       if accepted then 0 else 130

@@ -1,4 +1,4 @@
 (executable
  (name main)
  (public_name cud)
- (libraries cud_lib cmdliner lwt.unix))
+ (libraries cud_lib cmdliner eio_main))
