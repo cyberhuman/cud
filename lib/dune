@@ -1,0 +1,3 @@
+(library
+ (name cud_lib)
+ (libraries notty-community notty-community.lwt lwt lwt.unix))
