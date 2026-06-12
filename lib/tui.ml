@@ -22,6 +22,7 @@ type result = {
   status : Model.status option;  (** of the last finished run *)
   args : string list;  (** the arguments in the editor when the UI closed *)
   command : string;  (** the whole command, shell-quoted *)
+  output : string list;  (** the last finished run's output lines *)
 }
 
 type msg =
@@ -152,6 +153,10 @@ let run (opts : opts) : result Lwt.t =
         status = model.Model.status;
         args = Model.user_args model;
         command = Model.command_string model;
+        output =
+          Array.to_list model.lines
+          |> List.filter_map (fun (l : Model.line) ->
+                 if l.kind = Model.Info then None else Some l.text);
       }
   in
 

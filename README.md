@@ -66,6 +66,7 @@ exclusive flags:
 - `-l`, `--lines` — one argument per line, unquoted
 - `-0`, `--null` — NUL-separated, for `xargs -0`
 - `-c`, `--command` — the whole command including fixed args, ready to paste
+- `-o`, `--output` — the command's output instead of the arguments
 
 Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
 128+signal if it was killed); 130 when cancelled (Escape / Ctrl-C).

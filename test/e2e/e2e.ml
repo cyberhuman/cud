@@ -555,6 +555,22 @@ let test_accept_exit_code () =
   send sess (ctrl 'd');
   expect_exit sess 0
 
+let test_output_on_exit () =
+  let sess =
+    spawn "output-on-exit"
+      (Printf.sprintf "printf %%s %s | %s --debounce 0.05 -o -i .b jq"
+         (quote json) (quote cud))
+  in
+  expect_row sess 1 "[";
+  expect_status sess "1-5/5";
+  send sess (ctrl 'd');
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "  2," && contains printed "]") then begin
+    incr failures;
+    Printf.printf "FAIL output-on-exit: printed %S\n" printed
+  end
+
 let test_enter_accept () =
   let sess =
     spawn "enter-accept"
@@ -625,6 +641,7 @@ let () =
       ("cancel-silent", test_cancel_silent);
       ("accept-exit-code", test_accept_exit_code);
       ("enter-accept", test_enter_accept);
+      ("output-on-exit", test_output_on_exit);
     ]
   in
   List.iter

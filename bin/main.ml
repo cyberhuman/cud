@@ -1,4 +1,4 @@
-let print_args mode args command =
+let print_args mode args command out_lines =
   match mode with
   | `Quiet -> ()
   | `Quoted ->
@@ -12,6 +12,7 @@ let print_args mode args command =
           print_char '\000')
         args
   | `Command -> print_endline command
+  | `Output -> List.iter print_endline out_lines
 
 let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~placeholder
     ~output cmdline =
@@ -34,8 +35,8 @@ let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~placeholder
     }
   in
   match Lwt_main.run (Cud_lib.Tui.run opts) with
-  | { Cud_lib.Tui.accepted; status; args; command } ->
-      if accepted then print_args output args command;
+  | { Cud_lib.Tui.accepted; status; args; command; output = out_lines } ->
+      if accepted then print_args output args command out_lines;
       if not accepted then 130
       else (
         (* a failing command propagates its exit code through the accept *)
@@ -96,6 +97,10 @@ let output =
               ~doc:
                 "Print the whole command, including the fixed arguments, \
                  shell-quoted and ready to execute." );
+          ( `Output,
+            info [ "o"; "output" ]
+              ~doc:
+                "Print the command's output instead of the arguments." );
         ])
 
 let vim =
