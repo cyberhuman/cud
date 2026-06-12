@@ -16,6 +16,7 @@ type opts = {
   vim : bool;  (** vim keybindings *)
   enter_accept : bool;  (** Enter accepts and exits *)
   ansi : bool;  (** respect SGR color sequences in the output *)
+  multiline : bool;  (** multi-line args editor *)
 }
 
 type result = {
@@ -108,6 +109,9 @@ let input_of_event : Notty.Unescape.event -> Model.input option = function
   | `Key (`ASCII c, _) -> Some (Model.I_char (Uchar.of_char c))
   | `Key (`Uchar u, mods) when not (List.mem `Ctrl mods) ->
       Some (Model.I_char u)
+  | `Key (`Enter, mods) when List.mem `Meta mods ->
+      (* ESC CR, i.e. Alt-Enter (the tty's ICRNL turns CR into NL) *)
+      Some (Model.I_special Model.S_meta_enter)
   | `Key (`Enter, _) -> Some (Model.I_special Model.S_enter)
   | `Key (`Backspace, _) -> Some (Model.I_special Model.S_backspace)
   | `Key (`Delete, _) -> Some (Model.I_special Model.S_delete)
@@ -119,6 +123,12 @@ let input_of_event : Notty.Unescape.event -> Model.input option = function
       Some (Model.I_special Model.S_ctrl_right)
   | `Key (`Arrow `Left, _) -> Some (Model.I_special Model.S_left)
   | `Key (`Arrow `Right, _) -> Some (Model.I_special Model.S_right)
+  | `Key (`Arrow `Up, mods) when List.mem `Ctrl mods || List.mem `Shift mods
+    ->
+      Some (Model.I_special Model.S_mod_up)
+  | `Key (`Arrow `Down, mods)
+    when List.mem `Ctrl mods || List.mem `Shift mods ->
+      Some (Model.I_special Model.S_mod_down)
   | `Key (`Arrow `Up, _) -> Some (Model.I_special Model.S_up)
   | `Key (`Arrow `Down, _) -> Some (Model.I_special Model.S_down)
   | `Key (`Home, _) -> Some (Model.I_special Model.S_home)
@@ -214,7 +224,8 @@ let run (opts : opts) : result Lwt.t =
         match input_of_event event with
         | None -> loop model proc
         | Some input -> (
-            let view_h = max 1 (snd (Term.size term) - 2) in
+            let th = snd (Term.size term) in
+            let view_h = max 1 (th - Render.input_height ~h:th model - 1) in
             match Model.handle_input ~view_h model input with
             | Model.Quit_exit -> finish proc ~accepted:false model
             | Model.Accept_exit -> finish proc ~accepted:true model
@@ -235,7 +246,8 @@ let run (opts : opts) : result Lwt.t =
   let model =
     Model.create ?cmd:opts.cmd ?placeholder:opts.placeholder
       ~single:opts.single ~vim:opts.vim ~enter_accept:opts.enter_accept
-      ~ansi:opts.ansi ~fixed_args:opts.fixed_args ~initial:opts.initial ()
+      ~ansi:opts.ansi ~multiline:opts.multiline ~fixed_args:opts.fixed_args
+      ~initial:opts.initial ()
   in
   (* Run once at startup so the output area is populated immediately. *)
   let model, proc = start_run model None in

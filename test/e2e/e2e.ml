@@ -123,6 +123,10 @@ let expect_no_status sess needle =
   if contains (Vt.row_trim vt (vt.Vt.h - 1)) needle then
     fail sess (Printf.sprintf "status unexpectedly contains %S" needle)
 
+let expect_cursor_hidden sess =
+  wait_for sess "cursor hidden"
+    (fun vt -> not (Vt.cursor_visible vt))
+
 let expect_cursor sess (x, y) =
   wait_for sess
     (Printf.sprintf "cursor at %d,%d (visible)" x y)
@@ -694,6 +698,144 @@ let test_no_ansi () =
   send sess (ctrl 'c');
   expect_exit sess 130
 
+let test_multiline () =
+  (* a 30-element array so the output is taller than the viewport *)
+  let big_json =
+    Printf.sprintf {|{"a":{"b":[%s]}}|}
+      (String.concat "," (List.init 30 (fun i -> string_of_int (i + 1))))
+  in
+  let sess =
+    spawn "multiline"
+      (Printf.sprintf "printf %%s %s | %s -M -1 --debounce 0.05 jq"
+         (quote big_json) (quote cud))
+  in
+  expect_row sess 0 "jq>";
+  send sess ".a";
+  expect_row sess 0 "jq> .a";
+  (* plain Enter inserts a line break; the input grows to two rows and the
+     output shifts down by one *)
+  send sess enter;
+  send sess "|.b";
+  expect_row sess 0 "jq> .a";
+  expect_row sess 1 "  |.b";
+  expect_cursor sess (5, 1) (* two columns of indent + 3 chars *);
+  expect_row sess 2 "[";
+  expect_status sess "exit 0";
+  expect_status sess "1-21/32" (* 24 rows - 2 input rows - status bar *);
+
+  (* Up moves the cursor onto the first input line (column preserved as far
+     as it fits: col 3 clamps to ".a"'s length) *)
+  send sess up;
+  expect_cursor sess (6, 0);
+  send sess down;
+  expect_cursor sess (4, 1) (* the clamped column sticks *);
+  send sess end_;
+  expect_cursor sess (5, 1);
+
+  (* Tab cycles args -> fixed -> output *)
+  send sess "\t";
+  expect_cursor sess (3, 0) (* the empty fixed-args slot after "jq" *);
+  send sess "\t";
+  (* output focused: the cursor is hidden, the status bar says so, Up/Down
+     scroll, the input stays put *)
+  expect_cursor_hidden sess;
+  expect_status sess "[output]";
+  send sess down;
+  expect_status sess "2-22/32";
+  expect_row sess 1 "  |.b";
+  send sess pgdn;
+  expect_status sess "12-32/32";
+  send sess up;
+  expect_status sess "11-31/32";
+
+  (* Tab returns to the args; typing edits again *)
+  send sess "\t";
+  expect_cursor sess (5, 1);
+  send sess "%";
+  expect_row sess 1 "  |.b%";
+  expect_status sess "exit 3" (* broken filter *);
+  send sess "\x7f" (* backspace *);
+  expect_row sess 1 "  |.b";
+  expect_status sess "exit 0";
+
+  (* Ctrl+Down / Shift+Down scroll the output without leaving the input *)
+  send sess "\x1b[1;5B" (* Ctrl+Down *);
+  expect_status sess "2-22/32";
+  send sess "\x1b[1;2B" (* Shift+Down *);
+  expect_status sess "3-23/32";
+  send sess "\x1b[1;5A" (* Ctrl+Up *);
+  expect_status sess "2-22/32";
+  expect_cursor sess (5, 1) (* the input cursor did not move *);
+  send sess "\x1b[1;2A";
+  expect_status sess "1-21/32";
+
+  (* Enter again: a third line *)
+  send sess enter;
+  expect_cursor sess (2, 2);
+  expect_status sess "1-20/32" (* three input rows now *);
+
+  send sess (ctrl 'c');
+  expect_exit sess 130
+
+let test_multiline_enter_accept () =
+  (* priority: in multiline mode Enter is a line break even with -e; the
+     accept keys are Alt-Enter (or C-o) *)
+  let sess =
+    spawn "ml-enter-accept"
+      (Printf.sprintf "printf '' | %s -M -e --debounce 0.05 -- echo hi"
+         (quote cud))
+  in
+  expect_row sess 1 "hi";
+  send sess "x";
+  expect_row sess 0 "echo hi> x";
+  send sess enter (* newline, NOT accept *);
+  expect_cursor sess (2, 1);
+  send sess "y";
+  expect_row sess 1 "  y";
+  send sess "\x1b\r" (* Alt-Enter: accept *);
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "x y" || contains printed "x") then begin
+    incr failures;
+    Printf.printf "FAIL ml-enter-accept: printed %S\n" printed
+  end
+let test_ctrl_o_submit () =
+  (* C-o (0x0F) submits — accepts with -e — from the args field... *)
+  let sess =
+    spawn "ctrl-o-args"
+      (Printf.sprintf "printf '' | %s -M -e --debounce 0.05 -- echo hi"
+         (quote cud))
+  in
+  expect_row sess 1 "hi";
+  send sess "x";
+  expect_row sess 0 "echo hi> x";
+  send sess "\x0f";
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "x") then begin
+    incr failures;
+    Printf.printf "FAIL ctrl-o-args: printed %S\n" printed
+  end;
+  (* ...and with the output focused *)
+  let sess =
+    spawn "ctrl-o-output"
+      (Printf.sprintf "printf '' | %s -M -e --debounce 0.05 -- echo hi"
+         (quote cud))
+  in
+  expect_row sess 1 "hi";
+  send sess "x";
+  expect_row sess 0 "echo hi> x";
+  send sess "\t" (* args -> fixed *);
+  send sess "\t" (* fixed -> output *);
+  send sess "\x0f";
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "x") then begin
+    incr failures;
+    Printf.printf "FAIL ctrl-o-output: printed %S\n" printed
+  end
+
+
 let () =
   let tests =
     [
@@ -715,6 +857,9 @@ let () =
       ("edit-fixed", test_edit_fixed);
       ("ansi", test_ansi);
       ("no-ansi", test_no_ansi);
+      ("multiline", test_multiline);
+      ("ml-enter-accept", test_multiline_enter_accept);
+      ("ctrl-o-submit", test_ctrl_o_submit);
     ]
   in
   List.iter

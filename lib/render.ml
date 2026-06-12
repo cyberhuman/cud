@@ -1,8 +1,9 @@
 (** Pure screen renderer: model + terminal size -> a frame of styled rows.
 
-    Layout invariant: row 0 is the input line, the last row is the status
-    bar, everything between is the scrollable output viewport. Every frame
-    has exactly [h] rows and every row exactly [w] columns (counting Unicode
+    Layout invariant: the input area is on top (one row, or up to a third of
+    the screen in multiline mode), the last row is the status bar,
+    everything between is the scrollable output viewport. Every frame has
+    exactly [h] rows and every row exactly [w] columns (counting Unicode
     characters as one column each), so the layout can never shift. *)
 
 type ansi_color = Idx of int  (** 0..255 *) | Rgb of int * int * int
@@ -273,18 +274,77 @@ let style_of_kind = function
   | Model.Err -> Err_text
   | Model.Info -> Info_text
 
-(* The input line is composed of styled regions:
-     CMD [SP fixed-args] "> " args
-   The fixed-args region is editable too (Tab moves the cursor there); the
-   whole composed line scrolls horizontally to keep the cursor visible. *)
-let input_row ~w (m : Model.t) =
-  let args_text = sanitize_flat (Editor.to_string m.editor) in
+(* Flatten styled [parts] to per-character styles, take [w] columns starting
+   at [hscroll], pad with Input spaces, regroup into segments. *)
+let window_parts ~w ~hscroll parts =
+  let chars =
+    List.concat_map
+      (fun (style, s) ->
+        List.rev (fold_uchars (fun acc u -> (style, u) :: acc) [] s))
+      parts
+  in
+  let total = List.length chars in
+  let visible =
+    List.filteri (fun i _ -> i >= hscroll && i < hscroll + w) chars
+  in
+  let visible =
+    visible
+    @ List.init (w - min w (max 0 (total - hscroll))) (fun _ ->
+          (Input, Uchar.of_char ' '))
+  in
+  List.fold_left
+    (fun acc (style, u) ->
+      match acc with
+      | (st, b) :: rest when st == style ->
+          Buffer.add_utf_8_uchar b u;
+          (st, b) :: rest
+      | _ ->
+          let b = Buffer.create 16 in
+          Buffer.add_utf_8_uchar b u;
+          (style, b) :: acc)
+    [] visible
+  |> List.rev_map (fun (st, b) -> (st, Buffer.contents b))
+
+(* The args editor as display lines: one per '\n' in multiline mode, the
+   whole (control-sanitized) text as a single line otherwise. *)
+let args_lines (m : Model.t) =
+  if m.multiline then
+    String.split_on_char '\n' (Editor.to_string m.editor)
+    |> List.map sanitize_flat
+  else [ sanitize_flat (Editor.to_string m.editor) ]
+
+(** Rows taken by the input area: the number of args lines, clamped to a
+    third of the screen (and always at least one), so at least one output
+    row and the status bar survive. *)
+let input_height ~h (m : Model.t) =
+  if not m.multiline then 1
+  else min (List.length (args_lines m)) (max 1 (h / 3))
+
+(* (line, column) of character position [cur] within [lines] (lines are
+   separated by one '\n' character each). *)
+let cursor_line_col lines cur =
+  let rec go y cur = function
+    | [] -> (y, cur)
+    | l :: rest ->
+        let n = ulength l in
+        if cur <= n || rest = [] then (y, min cur n)
+        else go (y + 1) (cur - n - 1) rest
+  in
+  go 0 cur lines
+
+(* The input area is composed of styled regions:
+     CMD [SP fixed-args] "> " args-line-0
+     "  " args-line-1
+     ...
+   The fixed-args region is editable too (Tab moves the cursor there) and
+   lives on row 0 only. The row holding the cursor scrolls horizontally to
+   keep it visible; in multiline mode the area is clamped to [input_height]
+   rows and scrolls vertically to keep the cursor row visible. *)
+let input_area ~w ~h (m : Model.t) =
   let fixed_text = sanitize_flat (Model.fixed_text m) in
-  let parts, cursor_abs =
+  let prompt_parts, args_off, fixed_cursor =
     match m.cmd with
-    | None ->
-        ( [ (Prompt, "> "); (Input, args_text) ],
-          2 + Editor.cursor m.editor )
+    | None -> ([ (Prompt, "> ") ], 2, 0)
     | Some c ->
         let c = sanitize_flat c in
         let clen = ulength c in
@@ -297,47 +357,42 @@ let input_row ~w (m : Model.t) =
         let args_off =
           clen + (if fixed_shown then 1 + ulength fixed_text else 0) + 2
         in
-        let cursor_abs =
-          match m.focus with
-          | Model.F_args -> args_off + Editor.cursor m.editor
-          | Model.F_fixed -> clen + 1 + Editor.cursor m.fixed_editor
+        ( ((Prompt, c) :: fixed_parts) @ [ (Prompt, "> ") ],
+          args_off,
+          clen + 1 + Editor.cursor m.fixed_editor )
+  in
+  let lines = args_lines m in
+  let nlines = List.length lines in
+  let input_h = input_height ~h m in
+  let cy, ccol = cursor_line_col lines (Editor.cursor m.editor) in
+  let vscroll =
+    if m.focus = Model.F_fixed then 0
+    else max 0 (min (nlines - input_h) (cy - input_h + 1))
+  in
+  (* absolute (row, column) of the cursor before any scrolling *)
+  let cursor_row, cursor_abs =
+    match m.focus with
+    | Model.F_fixed -> (0, fixed_cursor)
+    | Model.F_args | Model.F_output ->
+        (cy, (if cy = 0 then args_off else 2) + ccol)
+  in
+  let rows =
+    List.init input_h (fun i ->
+        let li = vscroll + i in
+        let line = List.nth lines li in
+        let parts =
+          if li = 0 then prompt_parts @ [ (Input, line) ]
+          else [ (Prompt, "  "); (Input, line) ]
         in
-        ( ((Prompt, c) :: fixed_parts) @ [ (Prompt, "> "); (Input, args_text) ],
-          cursor_abs )
+        let hscroll =
+          if li = cursor_row && cursor_abs >= w then cursor_abs - w + 1 else 0
+        in
+        window_parts ~w ~hscroll parts)
   in
-  (* flatten to per-character styles, window on the cursor, regroup *)
-  let chars =
-    List.concat_map
-      (fun (style, s) ->
-        List.rev (fold_uchars (fun acc u -> (style, u) :: acc) [] s))
-      parts
-  in
-  let total = List.length chars in
   let hscroll = if cursor_abs < w then 0 else cursor_abs - w + 1 in
-  let visible =
-    List.filteri (fun i _ -> i >= hscroll && i < hscroll + w) chars
-  in
-  let visible =
-    visible
-    @ List.init (w - min w (max 0 (total - hscroll))) (fun _ ->
-          (Input, Uchar.of_char ' '))
-  in
-  let row =
-    List.fold_left
-      (fun acc (style, u) ->
-        match acc with
-        | (st, b) :: rest when st == style ->
-            Buffer.add_utf_8_uchar b u;
-            (st, b) :: rest
-        | _ ->
-            let b = Buffer.create 16 in
-            Buffer.add_utf_8_uchar b u;
-            (style, b) :: acc)
-      [] visible
-    |> List.rev_map (fun (st, b) -> (st, Buffer.contents b))
-  in
   let cx = min (cursor_abs - hscroll) (max 0 (w - 1)) in
-  (row, (cx, 0))
+  let cyv = max 0 (min (input_h - 1) (cursor_row - vscroll)) in
+  (rows, (cx, cyv))
 
 let status_row ~w ~view_h (m : Model.t) =
   let state =
@@ -370,7 +425,10 @@ let status_row ~w ~view_h (m : Model.t) =
   let mode = if m.single then " [1 arg] " else "" in
   let ansi_ind = if m.ansi then " [ansi] " else "" in
   let focus_ind =
-    match m.focus with Model.F_fixed -> " [fixed] " | _ -> ""
+    match m.focus with
+    | Model.F_fixed -> " [fixed] "
+    | Model.F_output -> " [output] "
+    | Model.F_args -> ""
   in
   let hints = "enter run · ^D accept · esc quit " in
   let leftw =
@@ -442,14 +500,17 @@ let output_rows ~w ~view_h (m : Model.t) =
 let render ~w ~h (m : Model.t) =
   if w <= 0 || h <= 0 then { rows = []; cursor = None }
   else
-    let input, cursor = input_row ~w m in
-    if h = 1 then { rows = [ input ]; cursor = Some cursor }
+    let input, cursor = input_area ~w ~h m in
+    (* with the output focused nothing can be typed: hide the cursor *)
+    let cursor = if m.focus = Model.F_output then None else Some cursor in
+    let input_h = List.length input in
+    let view_h = h - input_h - 1 in
+    if view_h < 0 then { rows = input; cursor }
     else
-      let view_h = h - 2 in
       let rows =
-        (input :: output_rows ~w ~view_h m) @ [ status_row ~w ~view_h m ]
+        input @ output_rows ~w ~view_h m @ [ status_row ~w ~view_h m ]
       in
-      { rows; cursor = Some cursor }
+      { rows; cursor }
 
 (* --- test helpers --- *)
 

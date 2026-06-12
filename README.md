@@ -59,6 +59,7 @@ Flags:
 - `-1`, `--single` — start in single-argument mode
 - `-I STR`, `--placeholder=STR` — substitution point in the fixed arguments
 - `-e`, `--enter-accept` — Enter accepts and exits (like Ctrl-D)
+- `-M`, `--multiline` — multi-line argument editor (see below)
 - `-A`, `--ansi` — respect ANSI SGR sequences (colors, bold, …) in the command's
   output instead of stripping them; other escape sequences are still removed
 - `--vim` — vim keybindings (see below)
@@ -82,17 +83,43 @@ Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
 | Key | Action |
 | --- | --- |
 | printable chars | edit the argument line |
-| Tab | move the cursor between the args field and the fixed args |
+| Tab | move the cursor between the args field and the fixed args (and the output with `-M`) |
+| Alt-Enter, C-o | accept/run, bypassing the multiline line break |
 | Left/Right, C-b/C-f, Home/End, C-a/C-e | move cursor |
 | M-b/M-f, C-Left/C-Right | move by word |
 | Backspace/Delete, C-w, C-u, C-k | delete char / word / to start / to end |
 | C-y | yank the last killed text |
-| Enter | re-run now |
+| Enter | re-run now (`-M`: insert a line break; `-e`: accept) |
 | C-t | toggle single-argument mode |
 | M-a | toggle ANSI color rendering (`--ansi`) |
 | Up/Down, PgUp/PgDn, C-p/C-n | scroll output |
+| Ctrl/Shift+Up/Down | scroll output (even from the input in `-M`) |
 | C-d | accept: exit 0 and print the arguments |
 | Esc, C-c | cancel: exit 130 |
+
+### Multiline mode (`-M`)
+
+The argument editor holds multiple lines; combined with `-1` the whole
+multi-line text is passed as one argument — handy for long jq filters:
+
+```
+kubectl get pods -o json | cud -M -1 jq
+```
+
+![cud multiline demo: building a three-line jq filter with Enter](demo-multiline.gif)
+
+- Enter inserts a line break; Alt-Enter (or Ctrl-O) does what Enter would
+  do otherwise — accept with `--enter-accept`, re-run without. The priority
+  for plain Enter is: multiline line break > accept (`-e`) > re-run
+- Up/Down (and vim `j`/`k`) move the cursor across the input lines,
+  preserving the column where possible; PgUp/PgDn — and Ctrl/Shift+Up/Down —
+  still scroll the output
+- Tab cycles the focus: args → fixed args → output → args (the fixed-args
+  stop is skipped when there is no fixed command); with the output focused,
+  Up/Down and PgUp/PgDn scroll it and printable keys are ignored
+- the input area grows with the text up to a third of the screen, then
+  scrolls vertically to follow the cursor; continuation lines are shown
+  indented by two spaces
 
 ### Vim mode (`--vim`)
 
@@ -102,7 +129,8 @@ mode, shown in the status bar:
 - motions: `h` `l` `0` `^` `$` `w` `b` `e` `f`*c* `F`*c* (WORD-wise)
 - edits: `x` `X` `s` `r`*c* `D` `C` `dd` `cc`, operators `d`/`c` with any
   motion (`cw` behaves like `ce`, as in vim)
-- `i` `a` `I` `A` enter insert mode; `p`/`P` paste the register;
+- `i` `a` `I` `A` enter insert mode (`-M`: also `o`/`O` to open a line
+  below/above); `p`/`P` paste the register;
   `u`/`C-r` undo/redo
 - output scrolling: `j` `k` `G` `gg`
 - Enter re-runs; C-d accepts; C-c cancels (Escape never quits in vim mode)

@@ -34,7 +34,7 @@ let split s =
     end
     else
       match s.[i] with
-      | ' ' | '\t' ->
+      | ' ' | '\t' | '\n' ->
           flush_word ();
           plain (i + 1)
       | '\'' ->

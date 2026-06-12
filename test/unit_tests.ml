@@ -530,6 +530,243 @@ let render_tests () =
   let bar = List.nth (Render.to_strings (Render.render ~w:40 ~h:3 m)) 2 in
   check "render.no-single-indicator" (not (contains bar "[1 arg]"))
 
+(* --- Multiline mode (-M) --- *)
+
+let multiline_tests () =
+  let key m k =
+    match Model.handle_key ~view_h:5 m k with
+    | Model.Continue (m', _) -> m'
+    | _ -> m
+  in
+  let keys m ks = List.fold_left key m ks in
+  let m =
+    Model.create ~multiline:true ~cmd:"jq" ~fixed_args:[] ~initial:".a" ()
+  in
+
+  (* Newline inserts a line break; '\n' splits into shell words *)
+  let m2 = keys m [ Model.Newline; Model.Insert (Uchar.of_char '|') ] in
+  check_str "ml.newline" ".a\n|" (Editor.to_string m2.Model.editor);
+  check "ml.newline-words"
+    (Model.command m2 = Ok (Some ("jq", [ ".a"; "|" ])));
+  (* single-argument mode passes the whole multi-line text as one arg *)
+  let s2 = { m2 with Model.single = true } in
+  check "ml.single-one-arg"
+    (Model.command s2 = Ok (Some ("jq", [ ".a\n|" ])));
+  (* in single-line mode Newline does nothing *)
+  let sl = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:".a" () in
+  check "ml.newline-disabled"
+    (Editor.to_string (key sl Model.Newline).Model.editor = ".a");
+  (* a newline never lands in the fixed-args field *)
+  let mfx = keys m [ Model.Toggle_focus; Model.Newline ] in
+  check_str "ml.no-newline-in-fixed" "" (Model.fixed_text mfx);
+
+  (* Up/Down move across lines, clamping the column *)
+  let m3 =
+    Model.create ~multiline:true ~cmd:"jq" ~fixed_args:[]
+      ~initial:"abcdef\nxy\nlonger" ()
+  in
+  let cur m = Editor.cursor m.Model.editor in
+  check_int "ml.cursor-at-end" 16 (cur m3);
+  let up1 = key m3 Model.Scroll_up in
+  (* col 6 on "longer" -> clamped to end of "xy" (index 7+2=9) *)
+  check_int "ml.up-clamp" 9 (cur up1);
+  let up2 = key up1 Model.Scroll_up in
+  (* col 2 on "xy" -> col 2 on "abcdef" *)
+  check_int "ml.up-keep-col" 2 (cur up2);
+  check_int "ml.up-at-top" 2 (cur (key up2 Model.Scroll_up));
+  let down1 = key up2 Model.Scroll_down in
+  check_int "ml.down-keep-col" 9 (cur down1) (* col 2 on "xy" *);
+  let down2 = key down1 Model.Scroll_down in
+  check_int "ml.down" 12 (cur down2) (* col 2 on "longer" *);
+  check_int "ml.down-at-bottom" 12 (cur (key down2 Model.Scroll_down));
+  (* PgUp/PgDn still scroll the output even with focus on the args *)
+  let m30 = with_lines 30 m3 in
+  check_int "ml.pgdn-scrolls" 5 (key m30 Model.Page_down).Model.scroll;
+
+  (* Tab cycles args -> fixed -> output -> args *)
+  let f1 = key m3 Model.Toggle_focus in
+  check "ml.tab-fixed" (f1.Model.focus = Model.F_fixed);
+  let f2 = key f1 Model.Toggle_focus in
+  check "ml.tab-output" (f2.Model.focus = Model.F_output);
+  let f3 = key f2 Model.Toggle_focus in
+  check "ml.tab-args" (f3.Model.focus = Model.F_args);
+  (* without a fixed command the fixed field is skipped *)
+  let nc = Model.create ~multiline:true ~fixed_args:[] ~initial:"" () in
+  let nf1 = key nc Model.Toggle_focus in
+  check "ml.tab-nocmd-output" (nf1.Model.focus = Model.F_output);
+  check "ml.tab-nocmd-args"
+    ((key nf1 Model.Toggle_focus).Model.focus = Model.F_args);
+
+  (* focus on the output: Up/Down scroll, typing is ignored, C-d/C-c work *)
+  let out = with_lines 30 f2 in
+  let inp m i =
+    match Model.handle_input ~view_h:5 m i with
+    | Model.Continue (m', _) -> m'
+    | _ -> m
+  in
+  let scrolled = inp out (Model.I_special Model.S_down) in
+  check_int "ml.output-down-scrolls" 1 scrolled.Model.scroll;
+  check_int "ml.output-up-scrolls" 0
+    (inp scrolled (Model.I_special Model.S_up)).Model.scroll;
+  check_int "ml.output-pgdn" 5
+    (inp out (Model.I_special Model.S_pgdn)).Model.scroll;
+  let typed = inp out (Model.I_char (Uchar.of_char 'Z')) in
+  check_str "ml.output-typing-ignored" "abcdef\nxy\nlonger"
+    (Editor.to_string typed.Model.editor);
+  check "ml.output-backspace-ignored"
+    (Editor.to_string
+       (inp out (Model.I_special Model.S_backspace)).Model.editor
+    = "abcdef\nxy\nlonger");
+  check "ml.output-ctrl-d"
+    (Model.handle_input ~view_h:5 out (Model.I_ctrl 'd') = Model.Accept_exit);
+  check "ml.output-ctrl-c"
+    (Model.handle_input ~view_h:5 out (Model.I_ctrl 'c') = Model.Quit_exit);
+  check "ml.output-enter-runs"
+    (match Model.handle_input ~view_h:5 out (Model.I_special Model.S_enter) with
+    | Model.Continue (_, [ Model.Start_run ]) -> true
+    | _ -> false);
+
+  (* the output focus hides the cursor and shows up in the status bar *)
+  let foc = key (key m Model.Toggle_focus) Model.Toggle_focus in
+  check "ml.output-focus" (foc.Model.focus = Model.F_output);
+  check "ml.output-cursor-hidden"
+    ((Render.render ~w:40 ~h:8 foc).Render.cursor = None);
+  let mlbar m = List.nth (Render.to_strings (Render.render ~w:60 ~h:6 m)) 5 in
+  let has hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+    nl = 0 || go 0
+  in
+  check "ml.output-indicator" (has (mlbar foc) "[output]");
+  check "ml.no-output-indicator" (not (has (mlbar m) "[output]"));
+  check "ml.args-cursor-shown"
+    ((Render.render ~w:40 ~h:8 m).Render.cursor <> None);
+
+  (* Ctrl/Shift+Up/Down scroll the output even while the cursor moves with
+     plain Up/Down in the input *)
+  let big = with_lines 30 m in
+  (match Model.handle_input ~view_h:5 big (Model.I_special Model.S_mod_down) with
+  | Model.Continue (m', []) -> (
+      check_int "ml.mod-down-scrolls" 1 m'.Model.scroll;
+      check_int "ml.mod-down-cursor-unmoved" (cur big) (cur m');
+      match Model.handle_input ~view_h:5 m' (Model.I_special Model.S_mod_up) with
+      | Model.Continue (m'', []) -> check_int "ml.mod-up-scrolls" 0 m''.Model.scroll
+      | _ -> fail "ml.mod-up" "unexpected reaction")
+  | _ -> fail "ml.mod-down" "unexpected reaction");
+
+  (* vim j/k move the cursor across input lines in normal mode *)
+  let vm =
+    Model.create ~multiline:true ~vim:true ~cmd:"jq" ~fixed_args:[]
+      ~initial:"abc\ndef" ()
+  in
+  let vn = inp vm (Model.I_special Model.S_escape) in
+  check "ml.vim-normal" (vn.Model.vmode = Model.V_normal);
+  check_int "ml.vim-esc-cursor" 6 (cur vn);
+  let vk = inp vn (Model.I_char (Uchar.of_char 'k')) in
+  check_int "ml.vim-k" 2 (cur vk);
+  check_int "ml.vim-j" 6 (cur (inp vk (Model.I_char (Uchar.of_char 'j'))));
+
+  (* vim o/O open a line below/above and enter insert mode *)
+  let vo = inp vn (Model.I_char (Uchar.of_char 'o')) in
+  check_str "ml.vim-o" "abc\ndef\n" (Editor.to_string vo.Model.editor);
+  check_int "ml.vim-o-cursor" 8 (cur vo);
+  check "ml.vim-o-insert" (vo.Model.vmode = Model.V_insert);
+  let vO = inp vn (Model.I_char (Uchar.of_char 'O')) in
+  check_str "ml.vim-O" "abc\n\ndef" (Editor.to_string vO.Model.editor);
+  check_int "ml.vim-O-cursor" 4 (cur vO);
+  check "ml.vim-O-insert" (vO.Model.vmode = Model.V_insert);
+  (* outside multiline mode o/O are no-ops *)
+  let sv =
+    Model.create ~vim:true ~cmd:"jq" ~fixed_args:[] ~initial:"ab" ()
+  in
+  let svn = inp sv (Model.I_special Model.S_escape) in
+  let svo = inp svn (Model.I_char (Uchar.of_char 'o')) in
+  check_str "ml.vim-o-singleline-noop" "ab" (Editor.to_string svo.Model.editor);
+  check "ml.vim-o-stays-normal" (svo.Model.vmode = Model.V_normal);
+
+  (* plain Enter inserts the line break in multiline mode *)
+  let en = inp m (Model.I_special Model.S_enter) in
+  check_str "ml.enter-newline" ".a\n" (Editor.to_string en.Model.editor);
+  (* C-o / Alt-Enter submit (run) without inserting a break *)
+  (match Model.handle_input ~view_h:5 m (Model.I_ctrl 'o') with
+  | Model.Continue (m', [ Model.Start_run ]) ->
+      check_str "ml.ctrl-o-runs" ".a" (Editor.to_string m'.Model.editor)
+  | _ -> fail "ml.ctrl-o" "C-o should run, not edit");
+  (match Model.handle_input ~view_h:5 m (Model.I_special Model.S_meta_enter) with
+  | Model.Continue (m', [ Model.Start_run ]) ->
+      check_str "ml.meta-enter-runs" ".a" (Editor.to_string m'.Model.editor)
+  | _ -> fail "ml.meta-enter" "Alt-Enter should run, not edit");
+  (* priority: multiline newline beats enter-accept; Alt-Enter accepts *)
+  let mea =
+    Model.create ~multiline:true ~enter_accept:true ~cmd:"jq" ~fixed_args:[]
+      ~initial:"x" ()
+  in
+  let mea_e = inp mea (Model.I_special Model.S_enter) in
+  check_str "ml.enter-beats-accept" "x\n" (Editor.to_string mea_e.Model.editor);
+  check "ml.alt-enter-accepts"
+    (Model.handle_input ~view_h:5 mea (Model.I_special Model.S_meta_enter)
+    = Model.Accept_exit);
+  (* vim normal mode: Enter runs, it does not insert a break *)
+  (match Model.handle_input ~view_h:5 vn (Model.I_special Model.S_enter) with
+  | Model.Continue (_, [ Model.Start_run ]) -> ()
+  | _ -> fail "ml.vim-normal-enter" "Enter in normal mode should run");
+
+  (* render: 2-line input, prompt on row 0, continuation indented *)
+  let r2 =
+    {
+      (Model.create ~multiline:true ~cmd:"jq" ~fixed_args:[]
+         ~initial:".a\n|.b" ())
+      with
+      Model.lines = [| { Model.kind = Out; text = "1" } |];
+      status = Some (Model.Exited 0);
+    }
+  in
+  let frame = Render.render ~w:20 ~h:7 r2 in
+  let rows = Render.to_strings frame in
+  check_rows "ml.render-2line"
+    [
+      "jq> .a              ";
+      "  |.b               ";
+      "1                   ";
+      "                    ";
+      "                    ";
+      "                    ";
+      " exit 0      1-1/1  ";
+    ]
+    rows;
+  check "ml.render-cursor-row1" (frame.Render.cursor = Some (5, 1));
+  (* cursor on the first line renders at row 0 *)
+  let r2h = { r2 with Model.editor = Editor.with_cursor r2.Model.editor 1 } in
+  check "ml.render-cursor-row0"
+    ((Render.render ~w:20 ~h:7 r2h).Render.cursor = Some (5, 0));
+
+  (* tall input is clamped to h/3 rows and follows the cursor *)
+  let tall =
+    Model.create ~multiline:true ~cmd:"jq" ~fixed_args:[]
+      ~initial:"l0\nl1\nl2\nl3\nl4" ()
+  in
+  let frame = Render.render ~w:20 ~h:9 tall in
+  let rows = Render.to_strings frame in
+  check_int "ml.render-clamp-rows" 9 (List.length rows);
+  (* 9/3 = 3 input rows; cursor on the last line -> window shows l2..l4 *)
+  check_str "ml.render-clamp-r0" "  l2" (Render.usub (List.nth rows 0) 0 4);
+  check_str "ml.render-clamp-r2" "  l4" (Render.usub (List.nth rows 2) 0 4);
+  check "ml.render-clamp-cursor" (frame.Render.cursor = Some (4, 2));
+  let top = { tall with Model.editor = Editor.with_cursor tall.Model.editor 0 } in
+  let frame = Render.render ~w:20 ~h:9 top in
+  check_str "ml.render-top-r0" "jq> l0"
+    (String.trim (List.nth (Render.to_strings frame) 0));
+  check "ml.render-top-cursor" (frame.Render.cursor = Some (4, 0));
+
+  (* scrolled output with the output focused still renders consistently *)
+  let outm = { (with_lines 30 f2) with Model.scroll = 7 } in
+  let frame = Render.render ~w:20 ~h:8 outm in
+  let rows = Render.to_strings frame in
+  (* 3 input lines (8/3 = 2 rows clamped), then the scrolled output *)
+  check_int "ml.render-out-rows" 8 (List.length rows);
+  check_str "ml.render-out-first" "line7"
+    (String.trim (List.nth rows 2))
+
 (* --- ANSI SGR parsing (--ansi) --- *)
 
 let ansi_toggle_tests () =
@@ -685,6 +922,23 @@ let render_invariants () =
           |];
         status = Some (Model.Exited 3);
       };
+      Model.create ~multiline:true ~cmd:"jq" ~fixed_args:[ "-r" ]
+        ~initial:"line one\nline two with some length\nthree\n\nfive" ();
+      (let m =
+         Model.create ~multiline:true ~fixed_args:[]
+           ~initial:".a\n|.b\n|.c" ()
+       in
+       let m = { (with_lines 40 m) with Model.scroll = 12 } in
+       match Model.handle_key ~view_h:5 m Model.Toggle_focus with
+       | Model.Continue (m, _) -> m
+       | _ -> m);
+      {
+        (Model.create ~multiline:true ~cmd:"jq" ~fixed_args:[]
+           ~initial:"x\ny\nz" ())
+        with
+        Model.editor =
+          Editor.with_cursor (Editor.of_string "x\ny\nz") 0;
+      };
       {
         (Model.create ~ansi:true ~cmd:"cat" ~fixed_args:[] ~initial:"" ()) with
         Model.lines =
@@ -716,10 +970,13 @@ let render_invariants () =
             rows;
           match frame.Render.cursor with
           | Some (x, y) ->
-              if not (x >= 0 && x < w && y = 0) then
+              if not (x >= 0 && x < w && y >= 0 && y < h) then
                 fail "render.inv-cursor" "state %d %dx%d: cursor %d,%d" si w h
                   x y
-          | None -> fail "render.inv-cursor-none" "state %d %dx%d" si w h
+          | None ->
+              (* the cursor is hidden only while the output is focused *)
+              if m.Model.focus <> Model.F_output then
+                fail "render.inv-cursor-none" "state %d %dx%d" si w h
         done
       done)
     states
@@ -770,6 +1027,7 @@ let () =
   model_tests ();
   vim_tests ();
   render_tests ();
+  multiline_tests ();
   ansi_tests ();
   ansi_toggle_tests ();
   render_invariants ();

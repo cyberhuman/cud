@@ -88,7 +88,7 @@ let kill_to_start t =
   match t.before with [] -> t | _ -> { t with before = [] }
 
 let is_blank u =
-  match Uchar.to_int u with 0x20 | 0x09 -> true | _ -> false
+  match Uchar.to_int u with 0x20 | 0x09 | 0x0a -> true | _ -> false
 
 (* [before] is scanned from the cursor towards the start of the line: first
    skip blanks, then the word itself. *)

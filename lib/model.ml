@@ -26,11 +26,17 @@ type key =
   | Kill_prev_word
   | Yank
   | Enter
+  | Newline  (** insert a line break (multiline mode only) *)
+  | Submit
+      (** accept (with --enter-accept) or run — what Enter does, ignoring
+          the multiline newline binding *)
   | Toggle_single
   | Toggle_ansi
   | Toggle_focus
   | Scroll_up
   | Scroll_down
+  | Scroll_output_up  (** always scrolls, even when Up/Down move the cursor *)
+  | Scroll_output_down
   | Page_up
   | Page_down
   | Scroll_top
@@ -42,6 +48,9 @@ type key =
 (** Raw terminal input, as delivered by the TUI layer. *)
 type ispecial =
   | S_enter
+  | S_meta_enter
+  | S_mod_up (* Ctrl/Shift+Up: scroll the output regardless of focus *)
+  | S_mod_down
   | S_backspace
   | S_delete
   | S_left
@@ -72,7 +81,9 @@ type vim_pending =
   | P_replace
   | P_g
 
-type focus = F_args | F_fixed
+type focus = F_args | F_fixed | F_output
+(** [F_output] (multiline mode only): the output viewport has the focus and
+    Up/Down scroll it. *)
 
 type t = {
   cmd : string option;
@@ -93,6 +104,7 @@ type t = {
   vim : bool;  (** vim keybindings enabled *)
   enter_accept : bool;  (** Enter accepts and exits instead of re-running *)
   ansi : bool;  (** respect SGR sequences in the output instead of stripping *)
+  multiline : bool;  (** the args editor holds multiple lines *)
   vmode : vmode;
   vpending : vim_pending;
   register : string;  (** last killed/deleted text, for paste/yank *)
@@ -108,11 +120,14 @@ let parse_error_of ~single text =
 
 let fixed_text t = Editor.to_string t.fixed_editor
 
-let focused t = match t.focus with F_args -> t.editor | F_fixed -> t.fixed_editor
+let focused t =
+  match t.focus with
+  | F_args | F_output -> t.editor
+  | F_fixed -> t.fixed_editor
 
 let set_focused t ed =
   match t.focus with
-  | F_args -> { t with editor = ed }
+  | F_args | F_output -> { t with editor = ed }
   | F_fixed -> { t with fixed_editor = ed }
 
 (** First problem among the two editable lines: the args line, then the
@@ -128,7 +143,7 @@ let compute_parse_error t =
         | Error e -> Some e)
 
 let create ?cmd ?placeholder ?(single = false) ?(vim = false)
-    ?(enter_accept = false) ?(ansi = false) ~fixed_args
+    ?(enter_accept = false) ?(ansi = false) ?(multiline = false) ~fixed_args
     ~initial () =
   let t =
   {
@@ -146,6 +161,7 @@ let create ?cmd ?placeholder ?(single = false) ?(vim = false)
     vim;
     enter_accept;
     ansi;
+    multiline;
     vmode = V_insert;
     vpending = P_none;
     register = "";
@@ -287,6 +303,44 @@ let with_edit ?register t ed =
 let with_scroll ~view_h t s =
   Continue ({ t with scroll = clamp_scroll ~view_h t s }, [])
 
+(* --- multiline cursor movement --- *)
+
+let nl_uchar = Uchar.of_char '\n'
+
+(** Move the cursor one line up ([dir = -1]) or down ([dir = 1]) within a
+    multi-line text, preserving the column when possible (clamped to the
+    target line's length). At the first/last line the editor is returned
+    unchanged. *)
+let cursor_vert ~dir ed =
+  let us = Array.of_list (Editor.to_uchars ed) in
+  let len = Array.length us in
+  let cur = Editor.cursor ed in
+  let line_start p =
+    let rec go i =
+      if i <= 0 then 0 else if Uchar.equal us.(i - 1) nl_uchar then i else go (i - 1)
+    in
+    go p
+  in
+  let line_end p =
+    let rec go i =
+      if i >= len then len else if Uchar.equal us.(i) nl_uchar then i else go (i + 1)
+    in
+    go p
+  in
+  let start = line_start cur in
+  let col = cur - start in
+  if dir < 0 then
+    if start = 0 then ed
+    else
+      let pstart = line_start (start - 1) in
+      Editor.with_cursor ed (pstart + min col (start - 1 - pstart))
+  else
+    let e = line_end cur in
+    if e >= len then ed
+    else
+      let nstart = e + 1 in
+      Editor.with_cursor ed (nstart + min col (line_end nstart - nstart))
+
 (* --- semantic actions --- *)
 
 let handle_key ~view_h t key =
@@ -321,18 +375,48 @@ let handle_key ~view_h t key =
   | Word_left -> with_motion t (Editor.word_left ed)
   | Word_right -> with_motion t (Editor.word_right ed)
   | Enter ->
+      (* priority: multiline newline > enter-accept > run *)
+      if
+        t.multiline && t.focus = F_args
+        && not (t.vim && t.vmode = V_normal)
+      then with_edit t (Editor.insert nl_uchar ed)
+      else if t.enter_accept then Accept_exit
+      else Continue (t, [ Start_run ])
+  | Submit ->
       if t.enter_accept then Accept_exit else Continue (t, [ Start_run ])
+  | Newline ->
+      if t.multiline && t.focus = F_args then with_edit t (Editor.insert nl_uchar ed)
+      else Continue (t, [])
   | Toggle_single ->
       let t = { t with single = not t.single } in
       Continue ({ t with parse_error = compute_parse_error t }, [ Start_run ])
   | Toggle_ansi -> Continue ({ t with ansi = not t.ansi }, [])
   | Toggle_focus ->
-      if t.cmd = None then Continue (t, [])
-      else
-        let focus = match t.focus with F_args -> F_fixed | F_fixed -> F_args in
-        Continue ({ t with focus; vpending = P_none }, [])
-  | Scroll_up -> with_scroll ~view_h t (t.scroll - 1)
-  | Scroll_down -> with_scroll ~view_h t (t.scroll + 1)
+      let focus =
+        if t.multiline then
+          (* F_args -> F_fixed -> F_output -> F_args, skipping the fixed
+             field when there is no fixed command *)
+          match t.focus with
+          | F_args -> if t.cmd = None then F_output else F_fixed
+          | F_fixed -> F_output
+          | F_output -> F_args
+        else if t.cmd = None then t.focus
+        else
+          match t.focus with
+          | F_args -> F_fixed
+          | F_fixed | F_output -> F_args
+      in
+      Continue ({ t with focus; vpending = P_none }, [])
+  | Scroll_up ->
+      if t.multiline && t.focus = F_args then
+        with_motion t (cursor_vert ~dir:(-1) ed)
+      else with_scroll ~view_h t (t.scroll - 1)
+  | Scroll_down ->
+      if t.multiline && t.focus = F_args then
+        with_motion t (cursor_vert ~dir:1 ed)
+      else with_scroll ~view_h t (t.scroll + 1)
+  | Scroll_output_up -> with_scroll ~view_h t (t.scroll - 1)
+  | Scroll_output_down -> with_scroll ~view_h t (t.scroll + 1)
   | Page_up -> with_scroll ~view_h t (t.scroll - max 1 view_h)
   | Page_down -> with_scroll ~view_h t (t.scroll + max 1 view_h)
   | Scroll_top -> with_scroll ~view_h t 0
@@ -359,6 +443,7 @@ let emacs_action input : key option =
       | 'p' -> Some Scroll_up
       | 'n' -> Some Scroll_down
       | 'l' -> Some Redraw
+      | 'o' -> Some Submit
       | 't' -> Some Toggle_single
       | 'd' -> Some Accept
       | 'c' -> Some Quit
@@ -372,6 +457,9 @@ let emacs_action input : key option =
   | I_special s -> (
       match s with
       | S_enter -> Some Enter
+      | S_meta_enter -> Some Submit
+      | S_mod_up -> Some Scroll_output_up
+      | S_mod_down -> Some Scroll_output_down
       | S_backspace -> Some Backspace
       | S_delete -> Some Delete
       | S_left -> Some Left
@@ -471,7 +559,7 @@ let vim_paste t ~after =
   end
 
 let editor_at t f =
-  match f with F_args -> t.editor | F_fixed -> t.fixed_editor
+  match f with F_args | F_output -> t.editor | F_fixed -> t.fixed_editor
 
 let vim_undo t =
   match t.undo with
@@ -499,6 +587,38 @@ let vim_redo t =
         }
       in
       Continue ({ t with parse_error = compute_parse_error t }, [ Schedule_rerun ])
+
+(* vim 'o'/'O' (multiline mode): open a new line below/above the cursor
+   line and enter insert mode. *)
+let vim_open_line t ~above =
+  if not (t.multiline && t.focus = F_args) then Continue (t, [])
+  else begin
+    let ed = focused t in
+    let us = uchars_array ed in
+    let len = Array.length us in
+    let cur = min (Editor.cursor ed) len in
+    let is_nl i = Uchar.to_int us.(i) = 0x0a in
+    let rec find_start i =
+      if i > 0 && not (is_nl (i - 1)) then find_start (i - 1) else i
+    in
+    let rec find_end i =
+      if i < len && not (is_nl i) then find_end (i + 1) else i
+    in
+    let pos, cursor =
+      if above then
+        let st = find_start cur in
+        (st, st)
+      else
+        let en = find_end cur in
+        (en, en + 1)
+    in
+    let text =
+      string_of_slice us 0 pos ^ "\n" ^ string_of_slice us pos len
+    in
+    let ed' = Editor.with_cursor (Editor.of_string text) cursor in
+    let t = { t with vmode = V_insert; vpending = P_none } in
+    with_edit t ed'
+  end
 
 (* Span of an operator+motion, [lo, hi). 'w' used with the change operator
    behaves like 'e' (standard vim special case). *)
@@ -607,6 +727,8 @@ let vim_normal ~view_h t input =
       | 'r' -> Continue ({ t with vpending = P_replace }, [])
       | 'f' -> Continue ({ t with vpending = P_find { back = false; op = None } }, [])
       | 'F' -> Continue ({ t with vpending = P_find { back = true; op = None } }, [])
+      | 'o' -> vim_open_line t ~above:false
+      | 'O' -> vim_open_line t ~above:true
       | 'p' -> vim_paste t ~after:true
       | 'P' -> vim_paste t ~after:false
       | 'u' -> vim_undo t
@@ -621,9 +743,28 @@ let vim_normal ~view_h t input =
       | Some (Insert _) | None -> Continue (t, [])
       | Some key -> handle_key ~view_h t key)
 
+(* With the output focused (multiline mode), editing keys are ignored:
+   Up/Down and PgUp/PgDn scroll, Tab moves on, and the global keys (Enter,
+   C-t, C-d, C-c, ...) keep working. *)
+let handle_output_focus ~view_h t input =
+  match input with
+  | I_special S_escape when t.vim ->
+      (* Escape never quits in vim mode *)
+      Continue ({ t with vmode = V_normal; vpending = P_none }, [])
+  | _ -> (
+      match emacs_action input with
+      | Some
+          (( Scroll_up | Scroll_down | Scroll_output_up | Scroll_output_down
+           | Page_up | Page_down | Toggle_single
+           | Toggle_focus | Enter | Submit | Redraw | Accept | Quit ) as key)
+        ->
+          handle_key ~view_h t key
+      | _ -> Continue (t, []))
+
 (** Entry point for raw input. *)
 let handle_input ~view_h t input =
-  if not t.vim then
+  if t.focus = F_output then handle_output_focus ~view_h t input
+  else if not t.vim then
     match emacs_action input with
     | Some key -> handle_key ~view_h t key
     | None -> Continue (t, [])
