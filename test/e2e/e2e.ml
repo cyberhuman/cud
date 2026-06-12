@@ -765,7 +765,7 @@ let test_multiline () =
 
   (* Tab cycles args -> fixed -> output *)
   send sess "\t";
-  expect_cursor sess (3, 0) (* the empty fixed-args slot after "jq" *);
+  expect_cursor sess (2, 0) (* end of the editable command "jq" *);
   send sess "\t";
   (* output focused: the cursor is hidden, the status bar says so, Up/Down
      scroll, the input stays put *)

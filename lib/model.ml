@@ -92,10 +92,10 @@ type focus = F_args | F_fixed | F_output
 type pane = { spec : string; hint : bool; plines : line array }
 
 type t = {
-  cmd : string option;
-      (** [None]: the input line itself is the command to run *)
   fixed_editor : Editor.t;
-      (** the fixed arguments as an editable, shell-split line *)
+      (** the fixed command line — program and arguments — as an editable,
+          shell-split line; empty means the args line itself is the
+          command *)
   focus : focus;  (** which editor the cursor is in *)
   placeholder : string option;
       (** xargs -I style: where in [fixed_args] the editable args go *)
@@ -142,21 +142,22 @@ let set_focused t ed =
 let compute_parse_error t =
   match parse_error_of ~single:t.single (Editor.to_string t.editor) with
   | Some _ as e -> e
-  | None ->
-      if t.cmd = None then None
-      else (
-        match Shellwords.split (fixed_text t) with
-        | Ok _ -> None
-        | Error e -> Some e)
+  | None -> (
+      match Shellwords.split (fixed_text t) with
+      | Ok _ -> None
+      | Error e -> Some e)
 
 let create ?cmd ?placeholder ?(single = false) ?(vim = false)
     ?(enter_accept = false) ?(ansi = false) ?(multiline = false)
     ?(lenses = []) ?(hints = []) ~fixed_args
     ~initial () =
+  let fixed_line =
+    Shellwords.join_command
+      (match cmd with Some c -> c :: fixed_args | None -> fixed_args)
+  in
   let t =
   {
-    cmd;
-    fixed_editor = Editor.of_string (Shellwords.join_command fixed_args);
+    fixed_editor = Editor.of_string fixed_line;
     focus = F_args;
     placeholder;
     editor = Editor.of_string initial;
@@ -230,27 +231,24 @@ let merge_args ~placeholder ~fixed words =
     mode. *)
 let command t =
   let text = Editor.to_string t.editor in
-  match t.cmd with
-  | Some cmd -> (
-      match Shellwords.split (fixed_text t) with
-      | Error e -> Error e
-      | Ok fixed ->
-          let merge words =
-            merge_args ~placeholder:t.placeholder ~fixed words
-          in
-          if t.single then
-            Ok (Some (cmd, merge (if text = "" then [] else [ text ])))
-          else (
-            match Shellwords.split text with
-            | Ok words -> Ok (Some (cmd, merge words))
-            | Error e -> Error e))
-  | None ->
+  match Shellwords.split (fixed_text t) with
+  | Error e -> Error e
+  | Ok [] ->
+      (* no fixed command line: the args line is the whole command *)
       if t.single then
         if text = "" then Ok None else Ok (Some ("sh", [ "-c"; text ]))
       else (
         match Shellwords.split text with
         | Ok [] -> Ok None
         | Ok (prog :: args) -> Ok (Some (prog, args))
+        | Error e -> Error e)
+  | Ok (prog :: fixed) ->
+      let merge words = merge_args ~placeholder:t.placeholder ~fixed words in
+      if t.single then
+        Ok (Some (prog, merge (if text = "" then [] else [ text ])))
+      else (
+        match Shellwords.split text with
+        | Ok words -> Ok (Some (prog, merge words))
         | Error e -> Error e)
 
 (** The arguments the user provided in the editor, for printing at exit. In
@@ -272,12 +270,8 @@ let command_string t =
   | Ok None -> ""
   | Error _ -> (
       let raw = Editor.to_string t.editor in
-      match t.cmd with
-      | Some cmd ->
-          let ft = fixed_text t in
-          let fixed = if ft = "" then cmd else cmd ^ " " ^ ft in
-          if raw = "" then fixed else fixed ^ " " ^ raw
-      | None -> raw)
+      let ft = fixed_text t in
+      if ft = "" then raw else if raw = "" then ft else ft ^ " " ^ raw)
 
 type effect_ = Schedule_rerun | Start_run
 type reaction = Continue of t * effect_ list | Accept_exit | Quit_exit
@@ -409,10 +403,9 @@ let handle_key ~view_h t key =
           (* F_args -> F_fixed -> F_output -> F_args, skipping the fixed
              field when there is no fixed command *)
           match t.focus with
-          | F_args -> if t.cmd = None then F_output else F_fixed
+          | F_args -> F_fixed
           | F_fixed -> F_output
           | F_output -> F_args
-        else if t.cmd = None then t.focus
         else
           match t.focus with
           | F_args -> F_fixed
@@ -767,7 +760,7 @@ let handle_output_focus ~view_h t input =
       match emacs_action input with
       | Some
           (( Scroll_up | Scroll_down | Scroll_output_up | Scroll_output_down
-           | Page_up | Page_down | Toggle_single
+           | Page_up | Page_down | Toggle_single | Toggle_ansi
            | Toggle_focus | Enter | Submit | Redraw | Accept | Quit ) as key)
         ->
           handle_key ~view_h t key

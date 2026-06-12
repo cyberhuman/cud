@@ -186,7 +186,8 @@ let run (opts : opts) : result Lwt.t =
         "CUD_BEFORE=" ^ Editor.to_string (Editor.kill_to_end ed);
         "CUD_AFTER=" ^ Editor.to_string (Editor.kill_to_start ed);
         "CUD_FIXED=" ^ Model.fixed_text model;
-        "CUD_CMD=" ^ Option.value model.cmd ~default:"";
+        ("CUD_CMD="
+        ^ match Model.command model with Ok (Some (p, _)) -> p | _ -> "");
       |]
     in
     Array.append (Unix.environment ()) extras

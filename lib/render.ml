@@ -343,23 +343,26 @@ let cursor_line_col lines cur =
 let input_area ~w ~h (m : Model.t) =
   let fixed_text = sanitize_flat (Model.fixed_text m) in
   let prompt_parts, args_off, fixed_cursor =
-    match m.cmd with
-    | None -> ([ (Prompt, "> ") ], 2, 0)
-    | Some c ->
-        let c = sanitize_flat c in
-        let clen = ulength c in
-        (* show the fixed-args slot when it has content or holds the
-           cursor *)
-        let fixed_shown = fixed_text <> "" || m.focus = Model.F_fixed in
-        let fixed_parts =
-          if fixed_shown then [ (Prompt, " "); (Input, fixed_text) ] else []
-        in
-        let args_off =
-          clen + (if fixed_shown then 1 + ulength fixed_text else 0) + 2
-        in
-        ( ((Prompt, c) :: fixed_parts) @ [ (Prompt, "> ") ],
-          args_off,
-          clen + 1 + Editor.cursor m.fixed_editor )
+    (* the whole fixed command line is editable; show its slot when it has
+       content or holds the cursor *)
+    let fixed_shown = fixed_text <> "" || m.focus = Model.F_fixed in
+    if not fixed_shown then ([ (Prompt, "> ") ], 2, 0)
+    else
+      let display = if fixed_text = "" then " " else fixed_text in
+      let parts =
+        (* cosmetic: the command word keeps the prompt color *)
+        match String.index_opt display ' ' with
+        | Some i when fixed_text <> "" ->
+            [
+              (Prompt, String.sub display 0 i);
+              (Input, String.sub display i (String.length display - i));
+            ]
+        | Some _ -> [ (Input, display) ]
+        | None -> [ (Prompt, display) ]
+      in
+      ( parts @ [ (Prompt, "> ") ],
+        ulength display + 2,
+        Editor.cursor m.fixed_editor )
   in
   let lines = args_lines m in
   let nlines = List.length lines in

@@ -251,7 +251,7 @@ let model_tests () =
         Model.handle_key ~view_h:5 mf (Model.Insert (Uchar.of_char 'C'))
       with
       | Model.Continue (mf, [ Model.Schedule_rerun ]) -> (
-          check_str "model.fixed-edited" "AA BBC" (Model.fixed_text mf);
+          check_str "model.fixed-edited" "echo AA BBC" (Model.fixed_text mf);
           check "model.fixed-command"
             (Model.command mf = Ok (Some ("echo", [ "AA"; "BBC"; "x" ])));
           match
@@ -262,13 +262,47 @@ let model_tests () =
           | _ -> fail "model.fixed-parse" "unexpected reaction")
       | _ -> fail "model.fixed-edit" "unexpected reaction")
   | _ -> fail "model.focus" "Tab should continue");
-  (* without a fixed command Tab is a no-op *)
+  (* even with no fixed command, Tab reaches the (empty) fixed field, so a
+     command prefix can be added interactively *)
   let nc2 = Model.create ~fixed_args:[] ~initial:"" () in
   (match Model.handle_key ~view_h:5 nc2 Model.Toggle_focus with
-  | Model.Continue (m, []) ->
-      check "model.focus-nocmd" (m.Model.focus = Model.F_args)
+  | Model.Continue (m, []) -> (
+      check "model.focus-nocmd" (m.Model.focus = Model.F_fixed);
+      let m =
+        List.fold_left
+          (fun m c ->
+            match
+              Model.handle_key ~view_h:5 m (Model.Insert (Uchar.of_char c))
+            with
+            | Model.Continue (m, _) -> m
+            | _ -> m)
+          m [ 'j'; 'q' ]
+      in
+      match Model.command m with
+      | Ok (Some ("jq", [])) -> ()
+      | _ -> fail "model.focus-nocmd-add-cmd" "typed command not picked up")
   | _ -> fail "model.focus-nocmd" "unexpected reaction");
 
+  (* the command word itself is editable *)
+  let cm = Model.create ~cmd:"echo" ~fixed_args:[ "hi" ] ~initial:"" () in
+  let cm =
+    List.fold_left
+      (fun m k ->
+        match Model.handle_key ~view_h:5 m k with
+        | Model.Continue (m, _) -> m
+        | _ -> m)
+      cm
+      [
+        Model.Toggle_focus; Model.Home; Model.Delete; Model.Delete;
+        Model.Delete; Model.Delete;
+        Model.Insert (Uchar.of_char 'c');
+        Model.Insert (Uchar.of_char 'a');
+        Model.Insert (Uchar.of_char 't');
+      ]
+  in
+  check_str "model.cmd-editable" "cat hi" (Model.fixed_text cm);
+  check "model.cmd-editable-command"
+    (Model.command cm = Ok (Some ("cat", [ "hi" ])));
   (* the status bar shows when the fixed args are being edited *)
   let contains hay needle =
     let nl = String.length needle and hl = String.length hay in
@@ -558,7 +592,7 @@ let multiline_tests () =
     (Editor.to_string (key sl Model.Newline).Model.editor = ".a");
   (* a newline never lands in the fixed-args field *)
   let mfx = keys m [ Model.Toggle_focus; Model.Newline ] in
-  check_str "ml.no-newline-in-fixed" "" (Model.fixed_text mfx);
+  check_str "ml.no-newline-in-fixed" "jq" (Model.fixed_text mfx);
 
   (* Up/Down move across lines, clamping the column *)
   let m3 =
@@ -590,12 +624,14 @@ let multiline_tests () =
   check "ml.tab-output" (f2.Model.focus = Model.F_output);
   let f3 = key f2 Model.Toggle_focus in
   check "ml.tab-args" (f3.Model.focus = Model.F_args);
-  (* without a fixed command the fixed field is skipped *)
+  (* with no fixed command the (empty) fixed field is still in the cycle *)
   let nc = Model.create ~multiline:true ~fixed_args:[] ~initial:"" () in
   let nf1 = key nc Model.Toggle_focus in
-  check "ml.tab-nocmd-output" (nf1.Model.focus = Model.F_output);
+  check "ml.tab-nocmd-fixed" (nf1.Model.focus = Model.F_fixed);
+  let nf2 = key nf1 Model.Toggle_focus in
+  check "ml.tab-nocmd-output" (nf2.Model.focus = Model.F_output);
   check "ml.tab-nocmd-args"
-    ((key nf1 Model.Toggle_focus).Model.focus = Model.F_args);
+    ((key nf2 Model.Toggle_focus).Model.focus = Model.F_args);
 
   (* focus on the output: Up/Down scroll, typing is ignored, C-d/C-c work *)
   let out = with_lines 30 f2 in

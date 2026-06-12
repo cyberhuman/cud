@@ -40,9 +40,10 @@ the fixed arguments instead of the end: `cud -I{} -- kubectl get {} -o json`
 splices the words in place of `{}`, and a fixed argument that merely contains
 `STR` (e.g. `--glob '*.{}'`) gets it substituted as text.
 
-The fixed arguments are editable too: Tab moves the cursor into the
-fixed-args region before the `>` and back; all editing keys (and vim mode)
-work there, and changes re-run the command.
+The fixed command line — including the command itself — is editable too:
+Tab moves the cursor into the region before the `>` and back; all editing
+keys (and vim mode) work there, and changes re-run. Emptying it makes the args line the whole command, and
+vice versa: started bare, Tab lets you add a command prefix.
 
 `CMD` itself is optional: with no command at all the input line *is* the
 command line (its first word is the program; in single-argument mode the
