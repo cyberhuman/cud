@@ -18,6 +18,7 @@ type opts = {
 
 type result = {
   accepted : bool;  (** Ctrl-D (true) vs Escape/Ctrl-C (false) *)
+  status : Model.status option;  (** of the last finished run *)
   args : string list;  (** the arguments in the editor when the UI closed *)
   command : string;  (** the whole command, shell-quoted *)
 }
@@ -147,6 +148,7 @@ let run (opts : opts) : result Lwt.t =
     Lwt.return
       {
         accepted;
+        status = model.Model.status;
         args = Model.user_args model;
         command = Model.command_string model;
       }

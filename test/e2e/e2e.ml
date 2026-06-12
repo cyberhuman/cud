@@ -535,6 +535,42 @@ let test_no_stdin () =
   send sess (ctrl 'c');
   expect_exit sess 130
 
+let test_accept_exit_code () =
+  (* accepting while the last run failed propagates its exit code *)
+  let sess =
+    spawn "accept-exit-code"
+      (Printf.sprintf "printf '' | %s -e --debounce 0.05 -- sh -c 'exit 7'"
+         (quote cud))
+  in
+  expect_status sess "exit 7";
+  expect_row sess 1 "(no output)";
+  send sess enter (* -e: accept *);
+  expect_exit sess 7;
+  (* C-d goes through the same path: a succeeding command still exits 0 *)
+  let sess =
+    spawn "accept-exit-zero"
+      (Printf.sprintf "printf '' | %s --debounce 0.05 -- true" (quote cud))
+  in
+  expect_status sess "exit 0";
+  send sess (ctrl 'd');
+  expect_exit sess 0
+
+let test_cancel_silent () =
+  let sess =
+    spawn "cancel-silent"
+      (Printf.sprintf "printf '' | %s --debounce 0.05 -i hello -- echo"
+         (quote cud))
+  in
+  expect_row sess 0 "echo> hello";
+  expect_row sess 1 "hello";
+  send sess (ctrl 'c');
+  expect_exit sess 130;
+  let printed = printed_after_release sess in
+  if contains printed "hello" then begin
+    incr failures;
+    Printf.printf "FAIL cancel-silent: printed %S on cancel\n" printed
+  end
+
 let test_placeholder () =
   let sess =
     spawn "placeholder"
@@ -569,6 +605,8 @@ let () =
       ("no-command", test_no_command);
       ("no-stdin", test_no_stdin);
       ("placeholder", test_placeholder);
+      ("cancel-silent", test_cancel_silent);
+      ("accept-exit-code", test_accept_exit_code);
     ]
   in
   List.iter

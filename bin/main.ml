@@ -33,9 +33,15 @@ let run ~initial ~manual ~debounce ~single ~vim ~placeholder ~output cmdline
     }
   in
   match Lwt_main.run (Cud_lib.Tui.run opts) with
-  | { Cud_lib.Tui.accepted; args; command } ->
-      print_args output args command;
-      if accepted then 0 else 130
+  | { Cud_lib.Tui.accepted; status; args; command } ->
+      if accepted then print_args output args command;
+      if not accepted then 130
+      else (
+        (* a failing command propagates its exit code through the accept *)
+        match status with
+        | Some (Cud_lib.Model.Exited n) -> n
+        | Some (Cud_lib.Model.Signaled s) -> 128 + s
+        | None -> 0)
   | exception Unix.Unix_error (err, fn, _) ->
       Printf.eprintf "cud: %s: %s\n" fn (Unix.error_message err);
       1
@@ -136,8 +142,10 @@ let cmd =
          (shell-quoted by default; see $(b,--quiet), $(b,--lines), \
          $(b,--null)).";
       `S Manpage.s_exit_status;
-      `P "0 when accepted with Ctrl-D, 130 when cancelled with Escape or \
-          Ctrl-C.";
+      `P
+        "On accept (Ctrl-D), the last run's exit code: 0 on success, the \
+         command's code when nonzero, 128+N when it died of signal N. 130 \
+         when cancelled with Escape or Ctrl-C.";
     ]
   in
   let term =

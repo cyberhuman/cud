@@ -56,7 +56,8 @@ Flags:
 - `-I STR`, `--placeholder=STR` — substitution point in the fixed arguments
 - `--vim` — vim keybindings (see below)
 
-On exit the final arguments are printed to stdout, controlled by mutually
+On accept (Ctrl-D) the final arguments are printed to stdout — cancelling
+prints nothing — controlled by mutually
 exclusive flags:
 
 - (default) shell-quoted, one line — splice with `jq $(cud ... )`
@@ -65,7 +66,8 @@ exclusive flags:
 - `-0`, `--null` — NUL-separated, for `xargs -0`
 - `-c`, `--command` — the whole command including fixed args, ready to paste
 
-Exit code 0 when accepted with Ctrl-D, 130 when cancelled (Escape / Ctrl-C).
+Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
+128+signal if it was killed); 130 when cancelled (Escape / Ctrl-C).
 
 ## Keys
 
