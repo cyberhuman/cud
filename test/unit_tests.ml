@@ -530,6 +530,137 @@ let render_tests () =
   let bar = List.nth (Render.to_strings (Render.render ~w:40 ~h:3 m)) 2 in
   check "render.no-single-indicator" (not (contains bar "[1 arg]"))
 
+(* --- ANSI SGR parsing (--ansi) --- *)
+
+let ansi_toggle_tests () =
+  let has hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+    nl = 0 || go 0
+  in
+  let m = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"" () in
+  let bar m = List.nth (Render.to_strings (Render.render ~w:60 ~h:4 m)) 3 in
+  check "ansi.toggle-off-default" (not m.Model.ansi);
+  (match Model.handle_input ~view_h:5 m (Model.I_meta 'a') with
+  | Model.Continue (m', []) ->
+      check "ansi.toggle-on" m'.Model.ansi;
+      check "ansi.toggle-indicator" (has (bar m') "[ansi]");
+      (match Model.handle_input ~view_h:5 m' (Model.I_meta 'a') with
+      | Model.Continue (m'', []) ->
+          check "ansi.toggle-back-off" (not m''.Model.ansi);
+          check "ansi.toggle-indicator-gone" (not (has (bar m'') "[ansi]"))
+      | _ -> fail "ansi.toggle-back" "unexpected reaction")
+  | _ -> fail "ansi.toggle" "unexpected reaction")
+
+let ansi_tests () =
+  let dflt = Render.ansi_default in
+  let red = { dflt with Render.fg = Some (Render.Idx 1) } in
+  let check_segs name expected input =
+    let actual = Render.ansi_segments input in
+    if actual <> expected then begin
+      let show segs =
+        String.concat "; "
+          (List.map (fun (_, s) -> Printf.sprintf "%S" s) segs)
+      in
+      fail name "segments mismatch on %S: got [%s] (%d segs, expected %d)"
+        input (show actual) (List.length actual) (List.length expected)
+    end
+  in
+  (* plain text: one default segment *)
+  check_segs "ansi.plain" [ (dflt, "hello") ] "hello";
+  (* basic color and reset mid-line *)
+  check_segs "ansi.basic-color"
+    [ (red, "RED"); (dflt, " plain") ]
+    "\x1b[31mRED\x1b[0m plain";
+  (* state carries across segments within the line *)
+  check_segs "ansi.carry"
+    [ (red, "a"); ({ red with Render.bold = true }, "b") ]
+    "\x1b[31ma\x1b[1mb";
+  (* 256-color and truecolor *)
+  check_segs "ansi.256"
+    [ ({ dflt with Render.fg = Some (Render.Idx 196) }, "x") ]
+    "\x1b[38;5;196mx";
+  check_segs "ansi.256-bg"
+    [ ({ dflt with Render.bg = Some (Render.Idx 22) }, "x") ]
+    "\x1b[48;5;22mx";
+  check_segs "ansi.truecolor"
+    [ ({ dflt with Render.fg = Some (Render.Rgb (12, 34, 56)) }, "x") ]
+    "\x1b[38;2;12;34;56mx";
+  (* bold + reverse, then attribute-specific resets *)
+  check_segs "ansi.bold-reverse"
+    [
+      ({ dflt with Render.bold = true; reverse = true }, "a");
+      ({ dflt with Render.reverse = true }, "b");
+      (dflt, "c");
+    ]
+    "\x1b[1;7ma\x1b[22mb\x1b[27mc";
+  (* bright colors and 39/49 defaults *)
+  check_segs "ansi.bright"
+    [
+      ({ dflt with Render.fg = Some (Render.Idx 12) }, "a");
+      (dflt, "b");
+    ]
+    "\x1b[94ma\x1b[39mb";
+  (* unknown CSI sequences are stripped without touching attributes *)
+  check_segs "ansi.unknown-csi" [ (dflt, "ab") ] "a\x1b[2Kb";
+  check_segs "ansi.cursor-csi" [ (dflt, "ab") ] "a\x1b[10;20Hb";
+  (* OSC stripped, both terminators; 2-char escapes stripped *)
+  check_segs "ansi.osc-bel" [ (dflt, "ab") ] "a\x1b]0;title\x07b";
+  check_segs "ansi.osc-st" [ (dflt, "ab") ] "a\x1b]8;;http://x\x1b\\b";
+  check_segs "ansi.two-char-esc" [ (dflt, "ab") ] "a\x1b=b";
+  (* truncated escape at end of line is dropped *)
+  check_segs "ansi.truncated" [ (dflt, "a") ] "a\x1b[31";
+  (* tabs expand to 8-column stops, other control chars become '?' *)
+  check_segs "ansi.tab" [ (dflt, "ab      cd") ] "ab\tcd";
+  check_segs "ansi.tab-after-color"
+    [ (red, "ab      c") ]
+    "\x1b[31mab\tc";
+  check_segs "ansi.control" [ (dflt, "a?b") ] "a\x01b";
+  (* empty sequence = reset; lone "m" *)
+  check_segs "ansi.empty-reset" [ (red, "a"); (dflt, "b") ] "\x1b[31ma\x1b[mb";
+
+  (* rendering: --ansi off keeps the sanitize path, on splits segments *)
+  let lines = [| { Model.kind = Out; text = "\x1b[31mRED\x1b[0m plain" } |] in
+  let plain =
+    {
+      (Model.create ~cmd:"cat" ~fixed_args:[] ~initial:"" ()) with
+      Model.lines;
+    }
+  in
+  let colored =
+    {
+      (Model.create ~ansi:true ~cmd:"cat" ~fixed_args:[] ~initial:"" ()) with
+      Model.lines;
+    }
+  in
+  let row1 m = List.nth (Render.render ~w:20 ~h:3 m).Render.rows 1 in
+  check_str "ansi.render-off" "?[31mRED?[0m plain  "
+    (Render.row_text (row1 plain));
+  check_str "ansi.render-on" "RED plain           "
+    (Render.row_text (row1 colored));
+  (match row1 colored with
+  | (Render.Ansi a, "RED") :: (Render.Out_text, _) :: _ ->
+      check "ansi.render-red" (a.Render.fg = Some (Render.Idx 1))
+  | _ -> fail "ansi.render-segments" "unexpected segment structure");
+  (* stderr without SGR stays Err_text in ansi mode *)
+  let err =
+    {
+      colored with
+      Model.lines = [| { Model.kind = Err; text = "oops" } |];
+    }
+  in
+  check "ansi.render-err"
+    (List.for_all (fun (st, _) -> st = Render.Err_text) (row1 err));
+  (* truncated colored line still fits exactly *)
+  let long =
+    {
+      colored with
+      Model.lines =
+        [| { Model.kind = Out; text = "\x1b[32m" ^ String.make 50 'g' } |];
+    }
+  in
+  check_int "ansi.render-crop" 20 (Render.ulength (Render.row_text (row1 long)))
+
 let render_invariants () =
   let base = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"" () in
   let states =
@@ -553,6 +684,18 @@ let render_invariants () =
             { Model.kind = Out; text = String.make 200 'x' };
           |];
         status = Some (Model.Exited 3);
+      };
+      {
+        (Model.create ~ansi:true ~cmd:"cat" ~fixed_args:[] ~initial:"" ()) with
+        Model.lines =
+          [|
+            { Model.kind = Out; text = "\x1b[31mRED\x1b[0m plain" };
+            { Model.kind = Out; text = "\x1b[1;38;5;196m" ^ String.make 120 'c' };
+            { Model.kind = Out; text = "\x1b[38;2;1;2;3mtrue\x1b[48;2;9;9;9mcolor" };
+            { Model.kind = Err; text = "a\x1b]0;t\x07b\tc\x1b[31" };
+            { Model.kind = Out; text = "\x1b[7m\x1b[4m" };
+          |];
+        status = Some (Model.Exited 0);
       };
     ]
   in
@@ -627,6 +770,8 @@ let () =
   model_tests ();
   vim_tests ();
   render_tests ();
+  ansi_tests ();
+  ansi_toggle_tests ();
   render_invariants ();
   runner_tests ();
   if !failures > 0 then begin

@@ -13,7 +13,7 @@ until the command line is properly digested.
 swaymsg -t get_outputs | cud jq
 ```
 
-![cud demo: swaymsg -t get_outputs | cud jq — live filter editing, single-arg mode toggle, accept](demo.gif)
+![cud demo: swaymsg -t get_outputs | cud --ansi -- jq -C — live filter editing with colors, single-arg mode toggle](demo.gif)
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -59,6 +59,8 @@ Flags:
 - `-1`, `--single` — start in single-argument mode
 - `-I STR`, `--placeholder=STR` — substitution point in the fixed arguments
 - `-e`, `--enter-accept` — Enter accepts and exits (like Ctrl-D)
+- `-A`, `--ansi` — respect ANSI SGR sequences (colors, bold, …) in the command's
+  output instead of stripping them; other escape sequences are still removed
 - `--vim` — vim keybindings (see below)
 
 On accept (Ctrl-D) the final arguments are printed to stdout — cancelling
@@ -87,6 +89,7 @@ Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
 | C-y | yank the last killed text |
 | Enter | re-run now |
 | C-t | toggle single-argument mode |
+| M-a | toggle ANSI color rendering (`--ansi`) |
 | Up/Down, PgUp/PgDn, C-p/C-n | scroll output |
 | C-d | accept: exit 0 and print the arguments |
 | Esc, C-c | cancel: exit 130 |

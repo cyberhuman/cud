@@ -5,6 +5,30 @@
     has exactly [h] rows and every row exactly [w] columns (counting Unicode
     characters as one column each), so the layout can never shift. *)
 
+type ansi_color = Idx of int  (** 0..255 *) | Rgb of int * int * int
+
+(** SGR attributes carried by a piece of command output (with [--ansi]). *)
+type ansi_attrs = {
+  fg : ansi_color option;
+  bg : ansi_color option;
+  bold : bool;
+  dim : bool;
+  italic : bool;
+  underline : bool;
+  reverse : bool;
+}
+
+let ansi_default =
+  {
+    fg = None;
+    bg = None;
+    bold = false;
+    dim = false;
+    italic = false;
+    underline = false;
+    reverse = false;
+  }
+
 type style =
   | Prompt
   | Input
@@ -14,6 +38,7 @@ type style =
   | Bar
   | Bar_alert
   | Bar_mode
+  | Ansi of ansi_attrs
 type seg = style * string
 
 type frame = {
@@ -100,6 +125,148 @@ let fit w s =
   if n = w then s
   else if n > w then usub s 0 w
   else s ^ String.make (w - n) ' '
+
+(* --- ANSI SGR parsing (--ansi) --- *)
+
+(** Apply the SGR parameter string [body] (the bytes between "ESC[" and the
+    final "m") to [attrs]. Unknown parameters are ignored; a malformed
+    extended-color introducer swallows the rest of the sequence. *)
+let apply_sgr attrs body =
+  let params =
+    String.split_on_char ';' body
+    |> List.map (fun f -> if f = "" then Some 0 else int_of_string_opt f)
+  in
+  let rec go a = function
+    | [] -> a
+    | None :: rest -> go a rest
+    | Some p :: rest -> (
+        match p with
+        | 0 -> go ansi_default rest
+        | 1 -> go { a with bold = true } rest
+        | 2 -> go { a with dim = true } rest
+        | 3 -> go { a with italic = true } rest
+        | 4 -> go { a with underline = true } rest
+        | 7 -> go { a with reverse = true } rest
+        | 22 -> go { a with bold = false; dim = false } rest
+        | 23 -> go { a with italic = false } rest
+        | 24 -> go { a with underline = false } rest
+        | 27 -> go { a with reverse = false } rest
+        | 39 -> go { a with fg = None } rest
+        | 49 -> go { a with bg = None } rest
+        | n when n >= 30 && n <= 37 -> go { a with fg = Some (Idx (n - 30)) } rest
+        | n when n >= 40 && n <= 47 -> go { a with bg = Some (Idx (n - 40)) } rest
+        | n when n >= 90 && n <= 97 ->
+            go { a with fg = Some (Idx (n - 90 + 8)) } rest
+        | n when n >= 100 && n <= 107 ->
+            go { a with bg = Some (Idx (n - 100 + 8)) } rest
+        | (38 | 48) as which -> (
+            let set a c =
+              if which = 38 then { a with fg = Some c } else { a with bg = Some c }
+            in
+            match rest with
+            | Some 5 :: Some n :: rest when n >= 0 && n <= 255 ->
+                go (set a (Idx n)) rest
+            | Some 2 :: Some r :: Some g :: Some b :: rest
+              when r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255
+              ->
+                go (set a (Rgb (r, g, b))) rest
+            | _ -> a)
+        | _ -> go a rest)
+  in
+  go attrs params
+
+(** Split a raw output line into [(attrs, text)] segments: SGR sequences set
+    the attributes (carried across segments, default at the start of each
+    line), every other escape sequence is stripped (CSI with any final, OSC
+    up to BEL or ESC-backslash, 2-character escapes), tabs expand to
+    8-column stops and remaining control characters become '?'. *)
+let ansi_segments s =
+  let n = String.length s in
+  let segs = ref [] in
+  let buf = Buffer.create 64 in
+  let attrs = ref ansi_default in
+  let flush () =
+    if Buffer.length buf > 0 then begin
+      segs := (!attrs, Buffer.contents buf) :: !segs;
+      Buffer.clear buf
+    end
+  in
+  let col = ref 0 in
+  let i = ref 0 in
+  while !i < n do
+    let c = s.[!i] in
+    if c = '\x1b' then begin
+      if !i + 1 >= n then i := n (* truncated escape: drop *)
+      else
+        match s.[!i + 1] with
+        | '[' ->
+            (* CSI: parameter/intermediate bytes up to a final 0x40-0x7e *)
+            let j = ref (!i + 2) in
+            while !j < n && not (s.[!j] >= '\x40' && s.[!j] <= '\x7e') do
+              incr j
+            done;
+            if !j >= n then i := n
+            else begin
+              if s.[!j] = 'm' then begin
+                let body = String.sub s (!i + 2) (!j - !i - 2) in
+                let a = apply_sgr !attrs body in
+                if a <> !attrs then begin
+                  flush ();
+                  attrs := a
+                end
+              end;
+              i := !j + 1
+            end
+        | ']' ->
+            (* OSC: skip until BEL or ESC-backslash *)
+            let j = ref (!i + 2) in
+            let fin = ref (-1) in
+            while !fin < 0 && !j < n do
+              if s.[!j] = '\x07' then fin := !j + 1
+              else if s.[!j] = '\x1b' && !j + 1 < n && s.[!j + 1] = '\\' then
+                fin := !j + 2
+              else incr j
+            done;
+            i := (if !fin >= 0 then !fin else n)
+        | _ -> i := !i + 2 (* 2-character escape *)
+    end
+    else if c = '\t' then begin
+      let next = ((!col / 8) + 1) * 8 in
+      for _ = !col to next - 1 do
+        Buffer.add_char buf ' '
+      done;
+      col := next;
+      incr i
+    end
+    else begin
+      let d = String.get_utf_8_uchar s !i in
+      let u =
+        if Uchar.utf_decode_is_valid d then Uchar.utf_decode_uchar d
+        else Uchar.rep
+      in
+      if is_control u then Buffer.add_char buf '?' else Buffer.add_utf_8_uchar buf u;
+      incr col;
+      i := !i + Uchar.utf_decode_length d
+    end
+  done;
+  flush ();
+  List.rev !segs
+
+(** Crop or pad a segment list to exactly [w] characters; padding gets the
+    [pad] style. *)
+let fit_segs ~pad w segs =
+  let rec crop budget = function
+    | [] -> ([], budget)
+    | _ when budget = 0 -> ([], 0)
+    | (st, s) :: rest ->
+        let n = ulength s in
+        if n <= budget then
+          let tl, rem = crop (budget - n) rest in
+          ((st, s) :: tl, rem)
+        else ([ (st, usub s 0 budget) ], 0)
+  in
+  let segs, rem = crop w segs in
+  if rem > 0 then segs @ [ (pad, String.make rem ' ') ] else segs
 
 let style_of_kind = function
   | Model.Out -> Out_text
@@ -201,13 +368,14 @@ let status_row ~w ~view_h (m : Model.t) =
     else match m.vmode with Model.V_normal -> " NORMAL " | Model.V_insert -> " INSERT "
   in
   let mode = if m.single then " [1 arg] " else "" in
+  let ansi_ind = if m.ansi then " [ansi] " else "" in
   let focus_ind =
     match m.focus with Model.F_fixed -> " [fixed] " | _ -> ""
   in
   let hints = "enter run · ^D accept · esc quit " in
   let leftw =
     ulength vim_mode + ulength state + ulength parse + ulength mode
-    + ulength focus_ind
+    + ulength ansi_ind + ulength focus_ind
   in
   (* Right-hand side: drop the hints, then the range, as space runs out. *)
   let right =
@@ -224,6 +392,7 @@ let status_row ~w ~view_h (m : Model.t) =
         ((if state_alert then Bar_alert else Bar), state);
         (Bar_alert, parse);
         (Bar, mode);
+        (Bar, ansi_ind);
         (Bar, focus_ind);
         (Bar, String.make mid ' ' ^ right);
       ]
@@ -251,14 +420,23 @@ let status_row ~w ~view_h (m : Model.t) =
     in
     crop [] w segs
 
+(** One output line as a row of exactly [w] characters. With [--ansi] the
+    line is split on its SGR sequences; segments with all-default attributes
+    keep the line kind's style (stderr stays red). *)
+let output_line ~ansi ~w (line : Model.line) =
+  let base = style_of_kind line.kind in
+  if not ansi then [ (base, fit w (sanitize_line line.text)) ]
+  else
+    ansi_segments line.text
+    |> List.map (fun (a, s) -> ((if a = ansi_default then base else Ansi a), s))
+    |> fit_segs ~pad:base w
+
 let output_rows ~w ~view_h (m : Model.t) =
   let count = Array.length m.lines in
   let scroll = Model.clamp_scroll ~view_h m m.scroll in
   List.init view_h (fun i ->
       let idx = scroll + i in
-      if idx < count then
-        let line = m.lines.(idx) in
-        [ (style_of_kind line.kind, fit w (sanitize_line line.text)) ]
+      if idx < count then output_line ~ansi:m.ansi ~w m.lines.(idx)
       else [ (Out_text, String.make w ' ') ])
 
 let render ~w ~h (m : Model.t) =

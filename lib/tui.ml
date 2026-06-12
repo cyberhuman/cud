@@ -15,6 +15,7 @@ type opts = {
   single : bool;  (** start in single-argument mode *)
   vim : bool;  (** vim keybindings *)
   enter_accept : bool;  (** Enter accepts and exits *)
+  ansi : bool;  (** respect SGR color sequences in the output *)
 }
 
 type result = {
@@ -37,6 +38,46 @@ let read_all_stdin () =
   if Unix.isatty Unix.stdin then None
   else Some (In_channel.input_all In_channel.stdin)
 
+(* 256-color palette: 16 named colors, the 6x6x6 cube, the grayscale ramp.
+   Truecolor is downscaled to the cube — notty's [A.rgb_888] would emit
+   38;2;R;G;B SGR even on terminals that don't understand it. *)
+let color_of_ansi =
+  let open Notty.A in
+  let base = [| black; red; green; yellow; blue; magenta; cyan; white |] in
+  let light =
+    [|
+      lightblack;
+      lightred;
+      lightgreen;
+      lightyellow;
+      lightblue;
+      lightmagenta;
+      lightcyan;
+      lightwhite;
+    |]
+  in
+  function
+  | Render.Idx n ->
+      let n = max 0 (min 255 n) in
+      if n < 8 then base.(n)
+      else if n < 16 then light.(n - 8)
+      else if n < 232 then
+        let n = n - 16 in
+        rgb ~r:(n / 36) ~g:(n / 6 mod 6) ~b:(n mod 6)
+      else gray (n - 232)
+  | Render.Rgb (r, g, b) ->
+      let q c = ((max 0 (min 255 c) * 5) + 127) / 255 in
+      rgb ~r:(q r) ~g:(q g) ~b:(q b)
+
+(* notty-community has no dim style; [a.dim] is dropped. *)
+let attr_of_ansi (a : Render.ansi_attrs) =
+  let open Notty.A in
+  let opt color acc = function Some c -> acc ++ color (color_of_ansi c) | None -> acc in
+  let flag cond s acc = if cond then acc ++ st s else acc in
+  opt fg empty a.fg |> fun acc ->
+  opt bg acc a.bg |> flag a.bold bold |> flag a.italic italic
+  |> flag a.underline underline |> flag a.reverse reverse
+
 let attr_of_style =
   let open Notty.A in
   function
@@ -48,6 +89,7 @@ let attr_of_style =
   | Render.Bar -> st reverse
   | Render.Bar_alert -> fg red ++ st reverse ++ st bold
   | Render.Bar_mode -> fg yellow ++ st reverse ++ st bold
+  | Render.Ansi a -> attr_of_ansi a
 
 let image_of_frame (frame : Render.frame) =
   let open Notty in
@@ -193,7 +235,7 @@ let run (opts : opts) : result Lwt.t =
   let model =
     Model.create ?cmd:opts.cmd ?placeholder:opts.placeholder
       ~single:opts.single ~vim:opts.vim ~enter_accept:opts.enter_accept
-      ~fixed_args:opts.fixed_args ~initial:opts.initial ()
+      ~ansi:opts.ansi ~fixed_args:opts.fixed_args ~initial:opts.initial ()
   in
   (* Run once at startup so the output area is populated immediately. *)
   let model, proc = start_run model None in

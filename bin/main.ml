@@ -14,8 +14,8 @@ let print_args mode args command out_lines =
   | `Command -> print_endline command
   | `Output -> List.iter print_endline out_lines
 
-let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~placeholder
-    ~output cmdline =
+let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~ansi
+    ~placeholder ~output cmdline =
   let cmd, fixed_args =
     match cmdline with [] -> (None, []) | cmd :: rest -> (Some cmd, rest)
   in
@@ -32,6 +32,7 @@ let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~placeholder
       single;
       vim;
       enter_accept;
+      ansi;
     }
   in
   match Lwt_main.run (Cud_lib.Tui.run opts) with
@@ -117,6 +118,15 @@ let enter_accept =
     & info [ "e"; "enter-accept" ]
         ~doc:"Enter accepts the arguments and exits (like Ctrl-D) instead of re-running.")
 
+let ansi =
+  Arg.(
+    value & flag
+    & info [ "A"; "ansi" ]
+        ~doc:
+          "Respect ANSI SGR sequences (colors, bold, ...) in the command's \
+           output instead of stripping them. Other escape sequences are \
+           still removed. Toggle at runtime with Alt-A.")
+
 let placeholder =
   Arg.(
     value & opt (some string) None
@@ -168,11 +178,12 @@ let cmd =
     and+ single
     and+ vim
     and+ enter_accept
+    and+ ansi
     and+ placeholder
     and+ output
     and+ cmdline in
-    run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~placeholder
-      ~output cmdline
+    run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~ansi
+      ~placeholder ~output cmdline
   in
   Cmd.v (Cmd.info "cud" ~doc ~man) term
 

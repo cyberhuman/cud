@@ -661,6 +661,39 @@ let test_placeholder () =
     Printf.printf "FAIL placeholder: printed args %S\n" printed
   end
 
+let test_ansi () =
+  (* --ansi: SGR sequences pass through to the terminal; the VT emulator
+     ignores SGR, so the row reads as the bare text *)
+  let sess =
+    spawn "ansi"
+      (Printf.sprintf
+         "printf '\\033[31mRED\\033[0m plain' | %s --ansi --debounce 0.05 cat"
+         (quote cud))
+  in
+  expect_row sess 0 "cat>";
+  expect_row sess 1 "RED plain";
+  expect_status sess "exit 0";
+  (* Alt-A toggles ANSI rendering off (escapes sanitized) and back on *)
+  send sess "\x1ba";
+  expect_row sess 1 "?[31mRED?[0m plain";
+  expect_status sess "exit 0" (* no re-run, just re-render *);
+  send sess "\x1ba";
+  expect_row sess 1 "RED plain";
+  send sess (ctrl 'c');
+  expect_exit sess 130
+
+let test_no_ansi () =
+  (* without --ansi the escape bytes are sanitized to '?' *)
+  let sess =
+    spawn "no-ansi"
+      (Printf.sprintf
+         "printf '\\033[31mRED\\033[0m plain' | %s --debounce 0.05 cat"
+         (quote cud))
+  in
+  expect_row sess 1 "?[31mRED?[0m plain";
+  send sess (ctrl 'c');
+  expect_exit sess 130
+
 let () =
   let tests =
     [
@@ -680,6 +713,8 @@ let () =
       ("enter-accept", test_enter_accept);
       ("output-on-exit", test_output_on_exit);
       ("edit-fixed", test_edit_fixed);
+      ("ansi", test_ansi);
+      ("no-ansi", test_no_ansi);
     ]
   in
   List.iter

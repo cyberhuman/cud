@@ -27,6 +27,7 @@ type key =
   | Yank
   | Enter
   | Toggle_single
+  | Toggle_ansi
   | Toggle_focus
   | Scroll_up
   | Scroll_down
@@ -91,6 +92,7 @@ type t = {
       (** pass the whole line as one argument instead of word-splitting *)
   vim : bool;  (** vim keybindings enabled *)
   enter_accept : bool;  (** Enter accepts and exits instead of re-running *)
+  ansi : bool;  (** respect SGR sequences in the output instead of stripping *)
   vmode : vmode;
   vpending : vim_pending;
   register : string;  (** last killed/deleted text, for paste/yank *)
@@ -126,7 +128,7 @@ let compute_parse_error t =
         | Error e -> Some e)
 
 let create ?cmd ?placeholder ?(single = false) ?(vim = false)
-    ?(enter_accept = false) ~fixed_args
+    ?(enter_accept = false) ?(ansi = false) ~fixed_args
     ~initial () =
   let t =
   {
@@ -143,6 +145,7 @@ let create ?cmd ?placeholder ?(single = false) ?(vim = false)
     single;
     vim;
     enter_accept;
+    ansi;
     vmode = V_insert;
     vpending = P_none;
     register = "";
@@ -322,6 +325,7 @@ let handle_key ~view_h t key =
   | Toggle_single ->
       let t = { t with single = not t.single } in
       Continue ({ t with parse_error = compute_parse_error t }, [ Start_run ])
+  | Toggle_ansi -> Continue ({ t with ansi = not t.ansi }, [])
   | Toggle_focus ->
       if t.cmd = None then Continue (t, [])
       else
@@ -361,6 +365,7 @@ let emacs_action input : key option =
       | _ -> None)
   | I_meta c -> (
       match c with
+      | 'a' -> Some Toggle_ansi
       | 'b' -> Some Word_left
       | 'f' -> Some Word_right
       | _ -> None)
