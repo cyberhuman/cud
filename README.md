@@ -40,6 +40,10 @@ the fixed arguments instead of the end: `cud -I{} -- kubectl get {} -o json`
 splices the words in place of `{}`, and a fixed argument that merely contains
 `STR` (e.g. `--glob '*.{}'`) gets it substituted as text.
 
+The fixed arguments are editable too: Tab moves the cursor into the
+fixed-args region before the `>` and back; all editing keys (and vim mode)
+work there, and changes re-run the command.
+
 `CMD` itself is optional: with no command at all the input line *is* the
 command line (its first word is the program; in single-argument mode the
 line runs via `sh -c`).
@@ -76,6 +80,7 @@ Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
 | Key | Action |
 | --- | --- |
 | printable chars | edit the argument line |
+| Tab | move the cursor between the args field and the fixed args |
 | Left/Right, C-b/C-f, Home/End, C-a/C-e | move cursor |
 | M-b/M-f, C-Left/C-Right | move by word |
 | Backspace/Delete, C-w, C-u, C-k | delete char / word / to start / to end |

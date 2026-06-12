@@ -106,26 +106,70 @@ let style_of_kind = function
   | Model.Err -> Err_text
   | Model.Info -> Info_text
 
+(* The input line is composed of styled regions:
+     CMD [SP fixed-args] "> " args
+   The fixed-args region is editable too (Tab moves the cursor there); the
+   whole composed line scrolls horizontally to keep the cursor visible. *)
 let input_row ~w (m : Model.t) =
-  let prompt =
-    sanitize_flat
-      (match m.cmd with
-      | Some c -> Shellwords.join_command (c :: m.fixed_args) ^ "> "
-      | None -> "> ")
+  let args_text = sanitize_flat (Editor.to_string m.editor) in
+  let fixed_text = sanitize_flat (Model.fixed_text m) in
+  let parts, cursor_abs =
+    match m.cmd with
+    | None ->
+        ( [ (Prompt, "> "); (Input, args_text) ],
+          2 + Editor.cursor m.editor )
+    | Some c ->
+        let c = sanitize_flat c in
+        let clen = ulength c in
+        (* show the fixed-args slot when it has content or holds the
+           cursor *)
+        let fixed_shown = fixed_text <> "" || m.focus = Model.F_fixed in
+        let fixed_parts =
+          if fixed_shown then [ (Prompt, " "); (Input, fixed_text) ] else []
+        in
+        let args_off =
+          clen + (if fixed_shown then 1 + ulength fixed_text else 0) + 2
+        in
+        let cursor_abs =
+          match m.focus with
+          | Model.F_args -> args_off + Editor.cursor m.editor
+          | Model.F_fixed -> clen + 1 + Editor.cursor m.fixed_editor
+        in
+        ( ((Prompt, c) :: fixed_parts) @ [ (Prompt, "> "); (Input, args_text) ],
+          cursor_abs )
   in
-  (* Keep at least one column for the text on absurdly narrow terminals. *)
-  let plen = min (ulength prompt) (max 0 (w - 1)) in
-  let prompt = usub prompt 0 plen in
-  let text = sanitize_flat (Editor.to_string m.editor) in
-  let tlen = ulength text in
-  let avail = w - plen in
-  let cur = Editor.cursor m.editor in
-  let hscroll = if cur < avail then 0 else cur - avail + 1 in
-  let visible = usub text hscroll (min avail (max 0 (tlen - hscroll))) in
+  (* flatten to per-character styles, window on the cursor, regroup *)
+  let chars =
+    List.concat_map
+      (fun (style, s) ->
+        List.rev (fold_uchars (fun acc u -> (style, u) :: acc) [] s))
+      parts
+  in
+  let total = List.length chars in
+  let hscroll = if cursor_abs < w then 0 else cursor_abs - w + 1 in
+  let visible =
+    List.filteri (fun i _ -> i >= hscroll && i < hscroll + w) chars
+  in
+  let visible =
+    visible
+    @ List.init (w - min w (max 0 (total - hscroll))) (fun _ ->
+          (Input, Uchar.of_char ' '))
+  in
   let row =
-    [ (Prompt, prompt); (Input, visible ^ String.make (avail - ulength visible) ' ') ]
+    List.fold_left
+      (fun acc (style, u) ->
+        match acc with
+        | (st, b) :: rest when st == style ->
+            Buffer.add_utf_8_uchar b u;
+            (st, b) :: rest
+        | _ ->
+            let b = Buffer.create 16 in
+            Buffer.add_utf_8_uchar b u;
+            (style, b) :: acc)
+      [] visible
+    |> List.rev_map (fun (st, b) -> (st, Buffer.contents b))
   in
-  let cx = min (plen + cur - hscroll) (max 0 (w - 1)) in
+  let cx = min (cursor_abs - hscroll) (max 0 (w - 1)) in
   (row, (cx, 0))
 
 let status_row ~w ~view_h (m : Model.t) =
@@ -157,8 +201,14 @@ let status_row ~w ~view_h (m : Model.t) =
     else match m.vmode with Model.V_normal -> " NORMAL " | Model.V_insert -> " INSERT "
   in
   let mode = if m.single then " [1 arg] " else "" in
+  let focus_ind =
+    match m.focus with Model.F_fixed -> " [fixed] " | _ -> ""
+  in
   let hints = "enter run · ^D accept · esc quit " in
-  let leftw = ulength vim_mode + ulength state + ulength parse + ulength mode in
+  let leftw =
+    ulength vim_mode + ulength state + ulength parse + ulength mode
+    + ulength focus_ind
+  in
   (* Right-hand side: drop the hints, then the range, as space runs out. *)
   let right =
     List.find_opt
@@ -174,6 +224,7 @@ let status_row ~w ~view_h (m : Model.t) =
         ((if state_alert then Bar_alert else Bar), state);
         (Bar_alert, parse);
         (Bar, mode);
+        (Bar, focus_ind);
         (Bar, String.make mid ' ' ^ right);
       ]
     else

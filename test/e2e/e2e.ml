@@ -555,6 +555,43 @@ let test_accept_exit_code () =
   send sess (ctrl 'd');
   expect_exit sess 0
 
+let test_edit_fixed () =
+  let sess =
+    spawn "edit-fixed"
+      (Printf.sprintf "printf '' | %s --debounce 0.05 -- echo AA BB"
+         (quote cud))
+  in
+  expect_row sess 0 "echo AA BB>";
+  expect_row sess 1 "AA BB";
+  expect_cursor sess (12, 0);
+  (* Tab moves the cursor into the fixed-args region (end of "AA BB") *)
+  send sess "\t";
+  expect_cursor sess (10, 0);
+  expect_status sess "[fixed]";
+  send sess " CC";
+  expect_row sess 0 "echo AA BB CC>";
+  expect_row sess 1 "AA BB CC";
+  (* editing keys work there: C-w kills the last fixed word *)
+  send sess (ctrl 'w');
+  expect_row sess 1 "AA BB";
+  (* Tab returns to the args field *)
+  send sess "\t";
+  send sess "x";
+  expect_row sess 1 "AA BB x";
+  (* edits work anywhere inside the fixed args: Tab in, then move with
+     plain motions (Left/Right never switch fields) *)
+  send sess "\t";
+  expect_cursor sess (11, 0) (* C-w left "AA BB " with a trailing space *);
+  send sess left;
+  send sess left;
+  send sess "\x7f" (* backspace inside the fixed args: deletes a 'B' *);
+  expect_row sess 0 "echo AA B > x";
+  expect_row sess 1 "AA B x";
+  send sess end_;
+  expect_cursor sess (10, 0) (* still in the fixed args *);
+  send sess (ctrl 'c');
+  expect_exit sess 130
+
 let test_output_on_exit () =
   let sess =
     spawn "output-on-exit"
@@ -642,6 +679,7 @@ let () =
       ("accept-exit-code", test_accept_exit_code);
       ("enter-accept", test_enter_accept);
       ("output-on-exit", test_output_on_exit);
+      ("edit-fixed", test_edit_fixed);
     ]
   in
   List.iter

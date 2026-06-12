@@ -27,6 +27,7 @@ type key =
   | Yank
   | Enter
   | Toggle_single
+  | Toggle_focus
   | Scroll_up
   | Scroll_down
   | Page_up
@@ -52,6 +53,7 @@ type ispecial =
   | S_pgdn
   | S_ctrl_left
   | S_ctrl_right
+  | S_tab
   | S_escape
 
 type input =
@@ -69,10 +71,14 @@ type vim_pending =
   | P_replace
   | P_g
 
+type focus = F_args | F_fixed
+
 type t = {
   cmd : string option;
       (** [None]: the input line itself is the command to run *)
-  fixed_args : string list;
+  fixed_editor : Editor.t;
+      (** the fixed arguments as an editable, shell-split line *)
+  focus : focus;  (** which editor the cursor is in *)
   placeholder : string option;
       (** xargs -I style: where in [fixed_args] the editable args go *)
   editor : Editor.t;
@@ -88,8 +94,8 @@ type t = {
   vmode : vmode;
   vpending : vim_pending;
   register : string;  (** last killed/deleted text, for paste/yank *)
-  undo : Editor.t list;
-  redo : Editor.t list;
+  undo : (focus * Editor.t) list;
+  redo : (focus * Editor.t) list;
   gen : int;  (** run generation, bumped by [start_run] *)
   edit_seq : int;  (** bumped on every text change, for debouncing *)
 }
@@ -98,12 +104,35 @@ let parse_error_of ~single text =
   if single then None
   else match Shellwords.split text with Ok _ -> None | Error e -> Some e
 
+let fixed_text t = Editor.to_string t.fixed_editor
+
+let focused t = match t.focus with F_args -> t.editor | F_fixed -> t.fixed_editor
+
+let set_focused t ed =
+  match t.focus with
+  | F_args -> { t with editor = ed }
+  | F_fixed -> { t with fixed_editor = ed }
+
+(** First problem among the two editable lines: the args line, then the
+    fixed-args line (only meaningful with a fixed command). *)
+let compute_parse_error t =
+  match parse_error_of ~single:t.single (Editor.to_string t.editor) with
+  | Some _ as e -> e
+  | None ->
+      if t.cmd = None then None
+      else (
+        match Shellwords.split (fixed_text t) with
+        | Ok _ -> None
+        | Error e -> Some e)
+
 let create ?cmd ?placeholder ?(single = false) ?(vim = false)
     ?(enter_accept = false) ~fixed_args
     ~initial () =
+  let t =
   {
     cmd;
-    fixed_args;
+    fixed_editor = Editor.of_string (Shellwords.join_command fixed_args);
+    focus = F_args;
     placeholder;
     editor = Editor.of_string initial;
     lines = [||];
@@ -122,6 +151,8 @@ let create ?cmd ?placeholder ?(single = false) ?(vim = false)
     gen = 0;
     edit_seq = 0;
   }
+  in
+  { t with parse_error = compute_parse_error t }
 
 let contains_sub s sub =
   let n = String.length s and m = String.length sub in
@@ -168,24 +199,27 @@ let merge_args ~placeholder ~fixed words =
     mode. *)
 let command t =
   let text = Editor.to_string t.editor in
-  let merge words =
-    merge_args ~placeholder:t.placeholder ~fixed:t.fixed_args words
-  in
   match t.cmd with
-  | Some cmd ->
-      if t.single then
-        Ok (Some (cmd, merge (if text = "" then [] else [ text ])))
-      else (
-        match Shellwords.split text with
-        | Ok words -> Ok (Some (cmd, merge words))
-        | Error e -> Error e)
+  | Some cmd -> (
+      match Shellwords.split (fixed_text t) with
+      | Error e -> Error e
+      | Ok fixed ->
+          let merge words =
+            merge_args ~placeholder:t.placeholder ~fixed words
+          in
+          if t.single then
+            Ok (Some (cmd, merge (if text = "" then [] else [ text ])))
+          else (
+            match Shellwords.split text with
+            | Ok words -> Ok (Some (cmd, merge words))
+            | Error e -> Error e))
   | None ->
       if t.single then
         if text = "" then Ok None else Ok (Some ("sh", [ "-c"; text ]))
       else (
         match Shellwords.split text with
         | Ok [] -> Ok None
-        | Ok (prog :: args) -> Ok (Some (prog, t.fixed_args @ args))
+        | Ok (prog :: args) -> Ok (Some (prog, args))
         | Error e -> Error e)
 
 (** The arguments the user provided in the editor, for printing at exit. In
@@ -209,7 +243,8 @@ let command_string t =
       let raw = Editor.to_string t.editor in
       match t.cmd with
       | Some cmd ->
-          let fixed = Shellwords.join_command (cmd :: t.fixed_args) in
+          let ft = fixed_text t in
+          let fixed = if ft = "" then cmd else cmd ^ " " ^ ft in
           if raw = "" then fixed else fixed ^ " " ^ raw
       | None -> raw)
 
@@ -222,30 +257,29 @@ let clamp_scroll ~view_h t s =
   let s = min s (max_scroll ~view_h t) in
   max 0 s
 
-let with_motion t ed = Continue ({ t with editor = ed }, [])
+let with_motion t ed = Continue (set_focused t ed, [])
 
 let undo_depth = 100
 
 let take n l = List.filteri (fun i _ -> i < n) l
 
 let push_undo t =
-  { t with undo = take undo_depth (t.editor :: t.undo); redo = [] }
+  { t with undo = take undo_depth ((t.focus, focused t) :: t.undo); redo = [] }
 
 (** Apply an edited editor value: snapshot for undo, recompute the parse
     state, request a (debounced) re-run. [register] records killed text. *)
 let with_edit ?register t ed =
-  if ed == t.editor then Continue (t, [])
+  if ed == focused t then Continue (t, [])
   else
-    let t = push_undo t in
-    Continue
-      ( {
-          t with
-          editor = ed;
-          register = Option.value register ~default:t.register;
-          parse_error = parse_error_of ~single:t.single (Editor.to_string ed);
-          edit_seq = t.edit_seq + 1;
-        },
-        [ Schedule_rerun ] )
+    let t = set_focused (push_undo t) ed in
+    let t =
+      {
+        t with
+        register = Option.value register ~default:t.register;
+        edit_seq = t.edit_seq + 1;
+      }
+    in
+    Continue ({ t with parse_error = compute_parse_error t }, [ Schedule_rerun ])
 
 let with_scroll ~view_h t s =
   Continue ({ t with scroll = clamp_scroll ~view_h t s }, [])
@@ -253,7 +287,7 @@ let with_scroll ~view_h t s =
 (* --- semantic actions --- *)
 
 let handle_key ~view_h t key =
-  let ed = t.editor in
+  let ed = focused t in
   let text_of us =
     let b = Buffer.create 32 in
     List.iter (Buffer.add_utf_8_uchar b) us;
@@ -286,14 +320,13 @@ let handle_key ~view_h t key =
   | Enter ->
       if t.enter_accept then Accept_exit else Continue (t, [ Start_run ])
   | Toggle_single ->
-      let single = not t.single in
-      Continue
-        ( {
-            t with
-            single;
-            parse_error = parse_error_of ~single (Editor.to_string ed);
-          },
-          [ Start_run ] )
+      let t = { t with single = not t.single } in
+      Continue ({ t with parse_error = compute_parse_error t }, [ Start_run ])
+  | Toggle_focus ->
+      if t.cmd = None then Continue (t, [])
+      else
+        let focus = match t.focus with F_args -> F_fixed | F_fixed -> F_args in
+        Continue ({ t with focus; vpending = P_none }, [])
   | Scroll_up -> with_scroll ~view_h t (t.scroll - 1)
   | Scroll_down -> with_scroll ~view_h t (t.scroll + 1)
   | Page_up -> with_scroll ~view_h t (t.scroll - max 1 view_h)
@@ -346,6 +379,7 @@ let emacs_action input : key option =
       | S_pgdn -> Some Page_down
       | S_ctrl_left -> Some Word_left
       | S_ctrl_right -> Some Word_right
+      | S_tab -> Some Toggle_focus
       | S_escape -> Some Quit)
 
 (* --- input interpretation: vim layer --- *)
@@ -398,12 +432,14 @@ let find_char ed ~back c =
   let rec bwd i = if i < 0 then None else if Uchar.equal us.(i) c then Some i else bwd (i - 1) in
   if back then bwd (cur - 1) else fwd (cur + 1)
 
-let enter_insert t ed = { t with vmode = V_insert; editor = ed; vpending = P_none }
+let enter_insert t ed =
+  let t = set_focused t ed in
+  { t with vmode = V_insert; vpending = P_none }
 
 (* Delete [lo, hi) from the line into the register; change-ops continue in
    insert mode at [lo]. *)
 let vim_delete_span ?(change = false) t lo hi =
-  let us = uchars_array t.editor in
+  let us = uchars_array (focused t) in
   let len = Array.length us in
   let lo = max 0 lo and hi = min len hi in
   if hi <= lo then Continue ({ t with vpending = P_none }, [])
@@ -419,9 +455,9 @@ let vim_delete_span ?(change = false) t lo hi =
 let vim_paste t ~after =
   if t.register = "" then Continue (t, [])
   else begin
-    let us = uchars_array t.editor in
+    let us = uchars_array (focused t) in
     let len = Array.length us in
-    let cur = Editor.cursor t.editor in
+    let cur = Editor.cursor (focused t) in
     let pos = if after && len > 0 then cur + 1 else cur in
     let text = string_of_slice us 0 pos ^ t.register ^ string_of_slice us pos len in
     let reg_len = List.length (Editor.to_uchars (Editor.of_string t.register)) in
@@ -429,40 +465,40 @@ let vim_paste t ~after =
     with_edit t ed'
   end
 
+let editor_at t f =
+  match f with F_args -> t.editor | F_fixed -> t.fixed_editor
+
 let vim_undo t =
   match t.undo with
   | [] -> Continue (t, [])
-  | ed :: rest ->
-      Continue
-        ( {
-            t with
-            editor = nclamp ed;
-            undo = rest;
-            redo = t.editor :: t.redo;
-            parse_error = parse_error_of ~single:t.single (Editor.to_string ed);
-            edit_seq = t.edit_seq + 1;
-          },
-          [ Schedule_rerun ] )
+  | (f, ed) :: rest ->
+      let prev = (f, editor_at t f) in
+      let t = set_focused { t with focus = f } (nclamp ed) in
+      let t =
+        { t with undo = rest; redo = prev :: t.redo; edit_seq = t.edit_seq + 1 }
+      in
+      Continue ({ t with parse_error = compute_parse_error t }, [ Schedule_rerun ])
 
 let vim_redo t =
   match t.redo with
   | [] -> Continue (t, [])
-  | ed :: rest ->
-      Continue
-        ( {
-            t with
-            editor = nclamp ed;
-            redo = rest;
-            undo = take undo_depth (t.editor :: t.undo);
-            parse_error = parse_error_of ~single:t.single (Editor.to_string ed);
-            edit_seq = t.edit_seq + 1;
-          },
-          [ Schedule_rerun ] )
+  | (f, ed) :: rest ->
+      let prev = (f, editor_at t f) in
+      let t = set_focused { t with focus = f } (nclamp ed) in
+      let t =
+        {
+          t with
+          redo = rest;
+          undo = take undo_depth (prev :: t.undo);
+          edit_seq = t.edit_seq + 1;
+        }
+      in
+      Continue ({ t with parse_error = compute_parse_error t }, [ Schedule_rerun ])
 
 (* Span of an operator+motion, [lo, hi). 'w' used with the change operator
    behaves like 'e' (standard vim special case). *)
 let operator_span t ~op motion =
-  let ed = t.editor in
+  let ed = focused t in
   let cur = Editor.cursor ed in
   let len = Editor.length ed in
   match motion with
@@ -497,7 +533,7 @@ let motion_of_char c =
   | _ -> None
 
 let vim_normal ~view_h t input =
-  let ed = t.editor in
+  let ed = focused t in
   let cur = Editor.cursor ed in
   let len = Editor.length ed in
   let clear_pending = { t with vpending = P_none } in
@@ -593,11 +629,10 @@ let handle_input ~view_h t input =
         match input with
         | I_special S_escape ->
             (* leaving insert mode steps the cursor back onto a character *)
-            let ed =
-              if Editor.cursor t.editor > 0 then Editor.left t.editor
-              else t.editor
-            in
-            Continue ({ t with vmode = V_normal; editor = nclamp ed }, [])
+            let cur = focused t in
+            let ed = if Editor.cursor cur > 0 then Editor.left cur else cur in
+            let t = set_focused t (nclamp ed) in
+            Continue ({ t with vmode = V_normal }, [])
         | _ -> (
             match emacs_action input with
             | Some key -> handle_key ~view_h t key

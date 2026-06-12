@@ -83,6 +83,7 @@ let input_of_event : Notty.Unescape.event -> Model.input option = function
   | `Key (`End, _) -> Some (Model.I_special Model.S_end)
   | `Key (`Page `Up, _) -> Some (Model.I_special Model.S_pgup)
   | `Key (`Page `Down, _) -> Some (Model.I_special Model.S_pgdn)
+  | `Key (`Tab, _) -> Some (Model.I_special Model.S_tab)
   | `Key (`Escape, _) -> Some (Model.I_special Model.S_escape)
   | _ -> None
 

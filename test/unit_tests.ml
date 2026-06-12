@@ -241,6 +241,61 @@ let model_tests () =
   check "model.ph-single"
     (Model.command ph_single = Ok (Some ("jq", [ ".x | .y"; "-c" ])));
 
+  (* editable fixed args: Tab switches focus, edits re-run with new fixed *)
+  let mf = Model.create ~cmd:"echo" ~fixed_args:[ "AA"; "BB" ] ~initial:"x" () in
+  check "model.focus-starts-args" (mf.Model.focus = Model.F_args);
+  (match Model.handle_key ~view_h:5 mf Model.Toggle_focus with
+  | Model.Continue (mf, []) -> (
+      check "model.focus-fixed" (mf.Model.focus = Model.F_fixed);
+      match
+        Model.handle_key ~view_h:5 mf (Model.Insert (Uchar.of_char 'C'))
+      with
+      | Model.Continue (mf, [ Model.Schedule_rerun ]) -> (
+          check_str "model.fixed-edited" "AA BBC" (Model.fixed_text mf);
+          check "model.fixed-command"
+            (Model.command mf = Ok (Some ("echo", [ "AA"; "BBC"; "x" ])));
+          match
+            Model.handle_key ~view_h:5 mf (Model.Insert (Uchar.of_char '\''))
+          with
+          | Model.Continue (mf, _) ->
+              check "model.fixed-parse-error" (mf.Model.parse_error <> None)
+          | _ -> fail "model.fixed-parse" "unexpected reaction")
+      | _ -> fail "model.fixed-edit" "unexpected reaction")
+  | _ -> fail "model.focus" "Tab should continue");
+  (* without a fixed command Tab is a no-op *)
+  let nc2 = Model.create ~fixed_args:[] ~initial:"" () in
+  (match Model.handle_key ~view_h:5 nc2 Model.Toggle_focus with
+  | Model.Continue (m, []) ->
+      check "model.focus-nocmd" (m.Model.focus = Model.F_args)
+  | _ -> fail "model.focus-nocmd" "unexpected reaction");
+
+  (* the status bar shows when the fixed args are being edited *)
+  let contains hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+    nl = 0 || go 0
+  in
+  let mfoc = Model.create ~cmd:"echo" ~fixed_args:[ "hi" ] ~initial:"" () in
+  let bar m = List.nth (Render.to_strings (Render.render ~w:60 ~h:4 m)) 3 in
+  check "model.no-fixed-indicator" (not (contains (bar mfoc) "[fixed]"));
+  (match Model.handle_key ~view_h:5 mfoc Model.Toggle_focus with
+  | Model.Continue (m, _) ->
+      check "model.fixed-indicator" (contains (bar m) "[fixed]")
+  | _ -> fail "model.fixed-indicator" "unexpected reaction");
+
+  (* Left/Right never switch fields: motions stop at the field edges *)
+  let bx = Model.create ~cmd:"echo" ~fixed_args:[ "AA" ] ~initial:"x" () in
+  let bx =
+    match Model.handle_key ~view_h:5 bx Model.Home with
+    | Model.Continue (m, _) -> m
+    | _ -> bx
+  in
+  (match Model.handle_key ~view_h:5 bx Model.Left with
+  | Model.Continue (m, []) ->
+      check "model.left-stays-in-args" (m.Model.focus = Model.F_args);
+      check_int "model.left-at-edge" 0 (Editor.cursor m.Model.editor)
+  | _ -> fail "model.left-edge" "unexpected reaction");
+
   (* no fixed command: the line itself is the command *)
   let nc = Model.create ~fixed_args:[] ~initial:"" () in
   check "model.nocmd-empty" (Model.command nc = Ok None);
@@ -441,9 +496,22 @@ let render_tests () =
     Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"abcdefghij" ()
   in
   let frame = Render.render ~w:10 ~h:3 long in
-  check_str "render.hscroll" "jq> fghij "
+  check_str "render.hscroll" "bcdefghij "
     (List.nth (Render.to_strings frame) 0);
   check "render.hscroll-cursor" (frame.Render.cursor = Some (9, 0));
+  (* cursor in the fixed-args region *)
+  let mf2 =
+    Model.create ~cmd:"echo" ~fixed_args:[ "AA" ] ~initial:"zz" ()
+  in
+  let mf2 =
+    match Model.handle_key ~view_h:5 mf2 Model.Toggle_focus with
+    | Model.Continue (m, _) -> m
+    | _ -> mf2
+  in
+  let frame = Render.render ~w:20 ~h:3 mf2 in
+  check_str "render.fixed-focus-row" "echo AA> zz"
+    (String.trim (List.nth (Render.to_strings frame) 0));
+  check "render.fixed-focus-cursor" (frame.Render.cursor = Some (7, 0));
 
   (* running indicator *)
   let contains hay needle =
