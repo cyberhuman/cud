@@ -497,6 +497,37 @@ let output_rows ~w ~view_h (m : Model.t) =
       if idx < count then output_line ~ansi:m.ansi ~w m.lines.(idx)
       else [ (Out_text, String.make w ' ') ])
 
+(* The lens/hint pane column: one section per pane, top to bottom, equal
+   heights with the last section absorbing the remainder. Each section is a
+   one-row header (the command string) over the head of its output. *)
+let pane_rows ~w ~view_h (m : Model.t) =
+  let n = Array.length m.panes in
+  let base = view_h / n in
+  List.concat
+    (List.init n (fun i ->
+         let p = m.panes.(i) in
+         let height = if i = n - 1 then view_h - (base * (n - 1)) else base in
+         if height <= 0 then []
+         else
+           [ (Bar, fit w (sanitize_line p.Model.spec)) ]
+           :: List.init (height - 1) (fun j ->
+                  if j < Array.length p.Model.plines then
+                    output_line ~ansi:m.ansi ~w p.Model.plines.(j)
+                  else [ (Out_text, String.make w ' ') ])))
+
+(* With panes (and enough width) the output viewport splits vertically:
+   the scrollable output on the left, panes on the right, separated by a
+   '│' column. The input area and the status bar stay full-width. *)
+let viewport_rows ~w ~view_h (m : Model.t) =
+  if Array.length m.panes = 0 || w < 20 then output_rows ~w ~view_h m
+  else
+    let lw = w / 2 in
+    let rw = w - lw - 1 in
+    List.map2
+      (fun l r -> l @ ((Info_text, "│") :: r))
+      (output_rows ~w:lw ~view_h m)
+      (pane_rows ~w:rw ~view_h m)
+
 let render ~w ~h (m : Model.t) =
   if w <= 0 || h <= 0 then { rows = []; cursor = None }
   else
@@ -508,7 +539,7 @@ let render ~w ~h (m : Model.t) =
     if view_h < 0 then { rows = input; cursor }
     else
       let rows =
-        input @ output_rows ~w ~view_h m @ [ status_row ~w ~view_h m ]
+        input @ viewport_rows ~w ~view_h m @ [ status_row ~w ~view_h m ]
       in
       { rows; cursor }
 

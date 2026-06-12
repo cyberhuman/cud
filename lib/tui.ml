@@ -17,6 +17,8 @@ type opts = {
   enter_accept : bool;  (** Enter accepts and exits *)
   ansi : bool;  (** respect SGR color sequences in the output *)
   multiline : bool;  (** multi-line args editor *)
+  lenses : string list;  (** [--lens] commands for the second pane *)
+  hints : string list;  (** [--hint] commands for the second pane *)
 }
 
 type result = {
@@ -30,7 +32,9 @@ type result = {
 type msg =
   | Event of [ Notty.Unescape.event | `Resize of int * int ]
   | Run_done of int * Runner.outcome
+  | Pane_done of int * int * Runner.outcome  (** pane index, pane generation *)
   | Debounce of int
+  | Hint_debounce of int
   | Events_closed
 
 let ( let* ) = Lwt.bind
@@ -158,6 +162,75 @@ let run (opts : opts) : result Lwt.t =
     Term.cursor term frame.cursor
   in
 
+  (* --- lens/hint panes --- *)
+  let npanes = List.length opts.lenses + List.length opts.hints in
+  (* per-pane run generation and in-flight process, for superseding *)
+  let pane_gens = Array.make (max 1 npanes) 0 in
+  let pane_procs : Runner.handle option array = Array.make (max 1 npanes) None in
+
+  (* The panes' stdin: the main command's latest finished output. *)
+  let pane_input (model : Model.t) =
+    let texts =
+      Array.to_list model.lines
+      |> List.filter_map (fun (l : Model.line) ->
+             if l.kind = Model.Info then None else Some l.text)
+    in
+    match texts with
+    | [] -> Some ""
+    | _ -> Some (String.concat "\n" texts ^ "\n")
+  in
+  let hint_env (model : Model.t) =
+    let ed = model.editor in
+    let extras =
+      [|
+        "CUD_BEFORE=" ^ Editor.to_string (Editor.kill_to_end ed);
+        "CUD_AFTER=" ^ Editor.to_string (Editor.kill_to_start ed);
+        "CUD_FIXED=" ^ Model.fixed_text model;
+        "CUD_CMD=" ^ Option.value model.cmd ~default:"";
+      |]
+    in
+    Array.append (Unix.environment ()) extras
+  in
+  let start_pane (model : Model.t) i =
+    let p = model.panes.(i) in
+    Option.iter (fun (h : Runner.handle) -> h.terminate ()) pane_procs.(i);
+    pane_gens.(i) <- pane_gens.(i) + 1;
+    let gen = pane_gens.(i) in
+    let env = if p.Model.hint then Some (hint_env model) else None in
+    let handle =
+      Runner.start ?env ~cmd:"sh" ~args:[ "-c"; p.Model.spec ]
+        ~input:(pane_input model) ()
+    in
+    pane_procs.(i) <- Some handle;
+    Lwt.async (fun () ->
+        let* outcome = handle.outcome in
+        push (Pane_done (i, gen, outcome));
+        Lwt.return_unit)
+  in
+  let start_panes ?(hints_only = false) (model : Model.t) =
+    Array.iteri
+      (fun i (p : Model.pane) ->
+        if p.hint || not hints_only then start_pane model i)
+      model.panes
+  in
+
+  (* Hints also re-run when the input text or cursor moves: a debounced
+     sequence counter, bumped on any change of the focused editor. *)
+  let hint_seq = ref 0 in
+  let schedule_hints () =
+    incr hint_seq;
+    let seq = !hint_seq in
+    Lwt.async (fun () ->
+        let* () = Lwt_unix.sleep 0.15 in
+        push (Hint_debounce seq);
+        Lwt.return_unit)
+  in
+  let has_hints = opts.hints <> [] in
+  let edit_sig (model : Model.t) =
+    let ed = Model.focused model in
+    (model.focus, Editor.to_string ed, Editor.cursor ed)
+  in
+
   let schedule_debounce (model : Model.t) =
     if opts.auto then
       let seq = model.edit_seq in
@@ -178,7 +251,7 @@ let run (opts : opts) : result Lwt.t =
         Option.iter (fun (p : Runner.handle) -> p.terminate ()) proc;
         let model = Model.start_run model in
         let gen = model.gen in
-        let handle = Runner.start ~cmd:prog ~args ~input:input_data in
+        let handle = Runner.start ~cmd:prog ~args ~input:input_data () in
         Lwt.async (fun () ->
             let* outcome = handle.outcome in
             push (Run_done (gen, outcome));
@@ -199,6 +272,9 @@ let run (opts : opts) : result Lwt.t =
 
   let finish proc ~accepted model =
     Option.iter (fun (p : Runner.handle) -> p.terminate ()) proc;
+    Array.iter
+      (Option.iter (fun (h : Runner.handle) -> h.terminate ()))
+      pane_procs;
     let* () = Term.release term in
     Lwt.return
       {
@@ -229,11 +305,24 @@ let run (opts : opts) : result Lwt.t =
             match Model.handle_input ~view_h model input with
             | Model.Quit_exit -> finish proc ~accepted:false model
             | Model.Accept_exit -> finish proc ~accepted:true model
-            | Model.Continue (model, effects) ->
-                let model, proc = apply_effects model proc effects in
-                loop model proc))
+            | Model.Continue (model', effects) ->
+                (* any change of the input text or cursor position
+                   (re)schedules the hints *)
+                if has_hints && edit_sig model' <> edit_sig model then
+                  schedule_hints ();
+                let model', proc = apply_effects model' proc effects in
+                loop model' proc))
     | Run_done (gen, { lines; status }) ->
-        loop (Model.finish_run model ~gen ~lines ~status) proc
+        let model' = Model.finish_run model ~gen ~lines ~status in
+        (* a fresh main output: re-run every lens and hint over it *)
+        if gen = model.gen then start_panes model';
+        loop model' proc
+    | Pane_done (i, gen, { lines; status = _ }) ->
+        if gen = pane_gens.(i) then begin
+          pane_procs.(i) <- None;
+          loop (Model.set_pane model i lines) proc
+        end
+        else loop model proc
     | Debounce seq ->
         (* Only the debounce of the latest edit triggers; an in-flight run is
            superseded (terminated) by [start_run]. *)
@@ -241,13 +330,16 @@ let run (opts : opts) : result Lwt.t =
           let model, proc = start_run model proc in
           loop model proc
         else loop model proc
+    | Hint_debounce seq ->
+        if seq = !hint_seq then start_panes ~hints_only:true model;
+        loop model proc
   in
 
   let model =
     Model.create ?cmd:opts.cmd ?placeholder:opts.placeholder
       ~single:opts.single ~vim:opts.vim ~enter_accept:opts.enter_accept
-      ~ansi:opts.ansi ~multiline:opts.multiline ~fixed_args:opts.fixed_args
-      ~initial:opts.initial ()
+      ~ansi:opts.ansi ~multiline:opts.multiline ~lenses:opts.lenses
+      ~hints:opts.hints ~fixed_args:opts.fixed_args ~initial:opts.initial ()
   in
   (* Run once at startup so the output area is populated immediately. *)
   let model, proc = start_run model None in

@@ -767,6 +767,62 @@ let multiline_tests () =
   check_str "ml.render-out-first" "line7"
     (String.trim (List.nth rows 2))
 
+(* --- Lens/hint panes (--lens / --hint) --- *)
+
+let pane_tests () =
+  let m =
+    {
+      (Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"."
+         ~lenses:[ "head -1" ] ~hints:[ "echo hi" ] ())
+      with
+      Model.lines =
+        [|
+          { Model.kind = Out; text = "{" };
+          { Model.kind = Out; text = "}" };
+        |];
+      status = Some (Model.Exited 0);
+    }
+  in
+  check_int "pane.count" 2 (Array.length m.Model.panes);
+  check "pane.lens-first" (not m.Model.panes.(0).Model.hint);
+  check "pane.hint-second" m.Model.panes.(1).Model.hint;
+  let m = Model.set_pane m 0 [| { Model.kind = Out; text = "{" } |] in
+  let m = Model.set_pane m 1 [| { Model.kind = Err; text = "boom" } |] in
+  check_str "pane.set" "{" m.Model.panes.(0).Model.plines.(0).Model.text;
+
+  (* layout: output on the left, separator, pane column on the right;
+     full-width input and status bar *)
+  let frame = Render.render ~w:21 ~h:8 m in
+  let rows = Render.to_strings frame in
+  check_rows "pane.render"
+    [
+      "jq> .                ";
+      "{         │head -1   ";
+      "}         │{         ";
+      "          │          ";
+      "          │echo hi   ";
+      "          │boom      ";
+      "          │          ";
+      " exit 0       1-2/2  ";
+    ]
+    rows;
+  (* the header is Bar-styled, the Err pane line red, separator Info *)
+  (match List.nth frame.Render.rows 1 with
+  | (Render.Out_text, _) :: (Render.Info_text, "│") :: (Render.Bar, _) :: _ ->
+      ()
+  | _ -> fail "pane.header-style" "row 1 styles unexpected");
+  (match List.nth frame.Render.rows 5 with
+  | (Render.Out_text, _) :: (Render.Info_text, "│") :: (Render.Err_text, _)
+    :: _ ->
+      ()
+  | _ -> fail "pane.err-style" "row 5 styles unexpected");
+
+  (* below 20 columns the panes are skipped entirely *)
+  let narrow = Render.to_strings (Render.render ~w:19 ~h:8 m) in
+  check "pane.narrow-no-split"
+    (not (String.exists (fun c -> c = '|') (List.nth narrow 1))
+    && Render.usub (List.nth narrow 1) 0 1 = "{")
+
 (* --- ANSI SGR parsing (--ansi) --- *)
 
 let ansi_toggle_tests () =
@@ -939,6 +995,22 @@ let render_invariants () =
         Model.editor =
           Editor.with_cursor (Editor.of_string "x\ny\nz") 0;
       };
+      (let m =
+         Model.create ~cmd:"jq" ~fixed_args:[] ~initial:".a"
+           ~lenses:[ "head -1" ] ()
+       in
+       let m = with_lines 10 m in
+       Model.set_pane m 0 [| { Model.kind = Out; text = "pane line" } |]);
+      (let m =
+         Model.create ~cmd:"jq" ~fixed_args:[] ~initial:""
+           ~lenses:[ "jq keys"; "wc -l" ]
+           ~hints:[ "printf %s \"$CUD_BEFORE\" longer-than-the-pane-is-wide" ]
+           ()
+       in
+       let m = { (with_lines 40 m) with Model.scroll = 11 } in
+       let m = Model.set_pane m 0 (Array.init 30 (fun i ->
+           { Model.kind = Out; text = Printf.sprintf "p%d" i })) in
+       Model.set_pane m 2 [| { Model.kind = Err; text = "err\tline" } |]);
       {
         (Model.create ~ansi:true ~cmd:"cat" ~fixed_args:[] ~initial:"" ()) with
         Model.lines =
@@ -985,7 +1057,7 @@ let render_invariants () =
 
 let runner_tests () =
   let run cmd args input =
-    Lwt_main.run (Runner.start ~cmd ~args ~input).Runner.outcome
+    Lwt_main.run (Runner.start ~cmd ~args ~input ()).Runner.outcome
   in
   let outcome =
     run "sh" [ "-c"; "cat; echo oops >&2" ] (Some "hello\nworld\n")
@@ -1015,7 +1087,7 @@ let runner_tests () =
   let outcome = run "cat" [] (Some big) in
   check_int "runner.big-roundtrip" 20000 (Array.length outcome.Runner.lines);
 
-  let handle = Runner.start ~cmd:"sleep" ~args:[ "100" ] ~input:None in
+  let handle = Runner.start ~cmd:"sleep" ~args:[ "100" ] ~input:None () in
   handle.Runner.terminate ();
   let outcome = Lwt_main.run handle.Runner.outcome in
   check "runner.terminated"
@@ -1028,6 +1100,7 @@ let () =
   vim_tests ();
   render_tests ();
   multiline_tests ();
+  pane_tests ();
   ansi_tests ();
   ansi_toggle_tests ();
   render_invariants ();

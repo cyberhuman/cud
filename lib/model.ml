@@ -85,6 +85,12 @@ type focus = F_args | F_fixed | F_output
 (** [F_output] (multiline mode only): the output viewport has the focus and
     Up/Down scroll it. *)
 
+(** A second-pane section ([--lens]/[--hint]): a command run with [sh -c]
+    over the main command's latest output. Hints additionally re-run as the
+    input line or cursor moves, and see CUD_BEFORE/CUD_AFTER/CUD_FIXED/
+    CUD_CMD in their environment. *)
+type pane = { spec : string; hint : bool; plines : line array }
+
 type t = {
   cmd : string option;
       (** [None]: the input line itself is the command to run *)
@@ -95,6 +101,7 @@ type t = {
       (** xargs -I style: where in [fixed_args] the editable args go *)
   editor : Editor.t;
   lines : line array;  (** output of the last finished run *)
+  panes : pane array;  (** lens/hint sections, lenses first *)
   scroll : int;  (** index of the first visible output line *)
   running : bool;
   status : status option;  (** of the last finished run *)
@@ -143,7 +150,8 @@ let compute_parse_error t =
         | Error e -> Some e)
 
 let create ?cmd ?placeholder ?(single = false) ?(vim = false)
-    ?(enter_accept = false) ?(ansi = false) ?(multiline = false) ~fixed_args
+    ?(enter_accept = false) ?(ansi = false) ?(multiline = false)
+    ?(lenses = []) ?(hints = []) ~fixed_args
     ~initial () =
   let t =
   {
@@ -153,6 +161,10 @@ let create ?cmd ?placeholder ?(single = false) ?(vim = false)
     placeholder;
     editor = Editor.of_string initial;
     lines = [||];
+    panes =
+      (let pane hint spec = { spec; hint; plines = [||] } in
+       Array.of_list
+         (List.map (pane false) lenses @ List.map (pane true) hints));
     scroll = 0;
     running = false;
     status = None;
@@ -798,6 +810,12 @@ let set_idle t ~note =
     lines = [| { kind = Info; text = note } |];
     scroll = 0;
   }
+
+(** Replace the output of pane [i]. *)
+let set_pane t i plines =
+  let panes = Array.copy t.panes in
+  panes.(i) <- { panes.(i) with plines };
+  { t with panes }
 
 (** Record the outcome of run [gen]; outcomes of superseded runs are
     ignored. *)

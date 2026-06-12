@@ -12,10 +12,11 @@ let ( let* ) = Lwt.bind
 
 (** [input = None] means there was no piped stdin: the command's stdin is
     closed right away (immediate EOF), so it can never try to read the
-    user's terminal. *)
-let start ~cmd ~args ~input : handle =
+    user's terminal. [env] overrides the inherited environment (used to
+    pass the CUD_* variables to hint commands). *)
+let start ?env ~cmd ~args ~input () : handle =
   let proc =
-    Lwt_process.open_process_full (cmd, Array.of_list (cmd :: args))
+    Lwt_process.open_process_full ?env (cmd, Array.of_list (cmd :: args))
   in
   (* Arrival order across the two channels approximates the interleaving the
      command produced; Lwt is cooperative, so the shared accumulator is

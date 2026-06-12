@@ -126,6 +126,37 @@ let expect_no_status sess needle =
 let expect_cursor_hidden sess =
   wait_for sess "cursor hidden"
     (fun vt -> not (Vt.cursor_visible vt))
+(* The two halves of a row when the output is split by --lens/--hint: the
+   main output occupies columns [0, w/2), the separator sits at w/2, the
+   lens/hint panes start after it. *)
+let left_half vt y =
+  let lw = vt.Vt.w / 2 in
+  String.concat "" (Array.to_list (Array.sub vt.Vt.grid.(y) 0 lw))
+
+let right_half vt y =
+  let lw = vt.Vt.w / 2 in
+  String.concat ""
+    (Array.to_list (Array.sub vt.Vt.grid.(y) (lw + 1) (vt.Vt.w - lw - 1)))
+
+let expect_left sess y expected =
+  wait_for sess
+    (Printf.sprintf "left half of row %d = %S" y expected)
+    (fun vt -> String.trim (left_half vt y) = expected)
+
+let expect_left_contains sess y needle =
+  wait_for sess
+    (Printf.sprintf "left half of row %d contains %S" y needle)
+    (fun vt -> contains (left_half vt y) needle)
+
+let expect_right_contains sess y needle =
+  wait_for sess
+    (Printf.sprintf "right half of row %d contains %S" y needle)
+    (fun vt -> contains (right_half vt y) needle)
+
+let expect_right sess y expected =
+  wait_for sess
+    (Printf.sprintf "right half of row %d = %S" y expected)
+    (fun vt -> String.trim (right_half vt y) = expected)
 
 let expect_cursor sess (x, y) =
   wait_for sess
@@ -835,6 +866,48 @@ let test_ctrl_o_submit () =
     Printf.printf "FAIL ctrl-o-output: printed %S\n" printed
   end
 
+let test_lens () =
+  let sess =
+    spawn "lens"
+      (Printf.sprintf
+         "printf %%s %s | %s --debounce 0.05 --lens 'head -1' -i . jq"
+         (quote json) (quote cud))
+  in
+  expect_row sess 0 "jq> .";
+  (* left pane: the lens header and its output; right pane: the usual
+     output, shifted past the separator column *)
+  expect_right_contains sess 1 "head -1";
+  expect_right sess 2 "{";
+  expect_left sess 1 "{";
+  expect_left_contains sess 2 {|"a": 1,|};
+  expect_status sess "exit 0";
+  expect_status sess "1-8/8" (* scrolling geometry is unchanged *);
+  send sess (ctrl 'c');
+  expect_exit sess 130
+
+let test_hint () =
+  let sess =
+    spawn "hint"
+      (Printf.sprintf
+         "printf %%s %s | %s --debounce 0.05 --lens 'head -1' --hint \
+          'printf %%s \"$CUD_BEFORE\"' jq"
+         (quote json) (quote cud))
+  in
+  (* two sections of 11 rows each: lens header on row 1, hint header on
+     row 12, hint output from row 13 *)
+  expect_right_contains sess 1 "head -1";
+  expect_right_contains sess 12 "CUD_BEFORE";
+  (* typing re-runs the hint with the text before the cursor *)
+  send sess ".b";
+  expect_row sess 0 "jq> .b";
+  expect_right sess 13 ".b";
+  expect_left_contains sess 1 "[" (* the main output also re-ran *);
+  expect_right sess 2 "[" (* ... and so did the lens *);
+  (* pure cursor motion re-runs the hint too: CUD_BEFORE shrinks *)
+  send sess left;
+  expect_right sess 13 ".";
+  send sess (ctrl 'c');
+  expect_exit sess 130
 
 let () =
   let tests =
@@ -860,6 +933,8 @@ let () =
       ("multiline", test_multiline);
       ("ml-enter-accept", test_multiline_enter_accept);
       ("ctrl-o-submit", test_ctrl_o_submit);
+      ("lens", test_lens);
+      ("hint", test_hint);
     ]
   in
   List.iter

@@ -62,6 +62,8 @@ Flags:
 - `-M`, `--multiline` — multi-line argument editor (see below)
 - `-A`, `--ansi` — respect ANSI SGR sequences (colors, bold, …) in the command's
   output instead of stripping them; other escape sequences are still removed
+- `--lens CMD`, `--hint CMD` — second pane with derived views (see below;
+  repeatable)
 - `--vim` — vim keybindings (see below)
 
 On accept (Ctrl-D) the final arguments are printed to stdout — cancelling
@@ -120,6 +122,37 @@ kubectl get pods -o json | cud -M -1 jq
 - the input area grows with the text up to a third of the screen, then
   scrolls vertically to follow the cursor; continuation lines are shown
   indented by two spaces
+
+### Lenses and hints (`--lens`, `--hint`)
+
+With at least one `--lens` or `--hint` the output area splits: the left
+half is the usual (scrollable) output, the right half shows one section per
+lens/hint command — lenses first, then hints, each under a header with its
+command string.
+
+![cud lens/hint demo: jq with a `jq keys` lens and a cursor-following hint](demo-lens.gif)
+
+Every lens/hint runs via `sh -c CMD` with the main command's latest output
+on stdin, and re-runs whenever a main run finishes — good for live summaries
+of what you are looking at:
+
+```
+kubectl get pods -o json | cud --lens 'jq keys' --lens 'wc -l' jq
+```
+
+Hints additionally re-run (debounced) every time the input line changes *or
+the cursor moves*, and see the editing context in their environment:
+
+- `CUD_BEFORE` / `CUD_AFTER` — the argument text before/after the cursor
+- `CUD_FIXED` — the fixed-arguments line
+- `CUD_CMD` — the command name (empty when the line itself is the command)
+
+That makes them a place for as-you-type suggestions or documentation
+lookups, e.g. showing the manual paragraph for the jq function you are
+typing: `--hint 'man -P cat jq | grep -F -A3 "$CUD_BEFORE"'`.
+
+Below 20 columns the panes are dropped and the full width goes back to the
+output.
 
 ### Vim mode (`--vim`)
 

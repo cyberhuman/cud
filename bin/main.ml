@@ -15,7 +15,7 @@ let print_args mode args command out_lines =
   | `Output -> List.iter print_endline out_lines
 
 let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~multiline
-    ~placeholder ~output cmdline =
+    ~lenses ~hints ~placeholder ~output cmdline =
   let cmd, fixed_args =
     match cmdline with [] -> (None, []) | cmd :: rest -> (Some cmd, rest)
   in
@@ -34,6 +34,8 @@ let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~multiline
       enter_accept;
       ansi;
       multiline;
+      lenses;
+      hints;
     }
   in
   match Lwt_main.run (Cud_lib.Tui.run opts) with
@@ -119,6 +121,27 @@ let enter_accept =
     & info [ "e"; "enter-accept" ]
         ~doc:"Enter accepts the arguments and exits (like Ctrl-D) instead of re-running.")
 
+let lenses =
+  Arg.(
+    value & opt_all string []
+    & info [ "lens" ] ~docv:"CMD"
+        ~doc:
+          "Run $(docv) with $(b,sh -c) over the main command's output and \
+           show the result in a pane left of the output, re-run after every \
+           main run. Repeatable. Example: $(b,--lens 'jq keys').")
+
+let hints =
+  Arg.(
+    value & opt_all string []
+    & info [ "hint" ] ~docv:"CMD"
+        ~doc:
+          "Like $(b,--lens), but also re-run (debounced) whenever the input \
+           line or the cursor moves, with the context in the environment: \
+           $(b,CUD_BEFORE)/$(b,CUD_AFTER) (the args text before/after the \
+           cursor), $(b,CUD_FIXED) (the fixed-args line) and $(b,CUD_CMD) \
+           (the command name). Repeatable; hints are shown below the \
+           lenses.")
+
 let multiline =
   Arg.(
     value & flag
@@ -192,11 +215,13 @@ let cmd =
     and+ enter_accept
     and+ ansi
     and+ multiline
+    and+ lenses
+    and+ hints
     and+ placeholder
     and+ output
     and+ cmdline in
     run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~multiline
-      ~placeholder ~output cmdline
+      ~lenses ~hints ~placeholder ~output cmdline
   in
   Cmd.v (Cmd.info "cud" ~doc ~man) term
 
