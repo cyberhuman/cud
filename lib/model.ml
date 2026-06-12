@@ -84,6 +84,7 @@ type t = {
   single : bool;
       (** pass the whole line as one argument instead of word-splitting *)
   vim : bool;  (** vim keybindings enabled *)
+  enter_accept : bool;  (** Enter accepts and exits instead of re-running *)
   vmode : vmode;
   vpending : vim_pending;
   register : string;  (** last killed/deleted text, for paste/yank *)
@@ -97,7 +98,8 @@ let parse_error_of ~single text =
   if single then None
   else match Shellwords.split text with Ok _ -> None | Error e -> Some e
 
-let create ?cmd ?placeholder ?(single = false) ?(vim = false) ~fixed_args
+let create ?cmd ?placeholder ?(single = false) ?(vim = false)
+    ?(enter_accept = false) ~fixed_args
     ~initial () =
   {
     cmd;
@@ -111,6 +113,7 @@ let create ?cmd ?placeholder ?(single = false) ?(vim = false) ~fixed_args
     parse_error = parse_error_of ~single initial;
     single;
     vim;
+    enter_accept;
     vmode = V_insert;
     vpending = P_none;
     register = "";
@@ -280,7 +283,8 @@ let handle_key ~view_h t key =
   | End -> with_motion t (Editor.end_ ed)
   | Word_left -> with_motion t (Editor.word_left ed)
   | Word_right -> with_motion t (Editor.word_right ed)
-  | Enter -> Continue (t, [ Start_run ])
+  | Enter ->
+      if t.enter_accept then Accept_exit else Continue (t, [ Start_run ])
   | Toggle_single ->
       let single = not t.single in
       Continue

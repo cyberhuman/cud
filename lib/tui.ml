@@ -14,6 +14,7 @@ type opts = {
   debounce : float;  (** seconds to wait after the last edit *)
   single : bool;  (** start in single-argument mode *)
   vim : bool;  (** vim keybindings *)
+  enter_accept : bool;  (** Enter accepts and exits *)
 }
 
 type result = {
@@ -185,7 +186,7 @@ let run (opts : opts) : result Lwt.t =
 
   let model =
     Model.create ?cmd:opts.cmd ?placeholder:opts.placeholder
-      ~single:opts.single ~vim:opts.vim
+      ~single:opts.single ~vim:opts.vim ~enter_accept:opts.enter_accept
       ~fixed_args:opts.fixed_args ~initial:opts.initial ()
   in
   (* Run once at startup so the output area is populated immediately. *)

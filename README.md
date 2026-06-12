@@ -54,6 +54,7 @@ Flags:
 - `--debounce=SECONDS` — delay before the automatic re-run (default 0.3)
 - `-1`, `--single` — start in single-argument mode
 - `-I STR`, `--placeholder=STR` — substitution point in the fixed arguments
+- `-e`, `--enter-accept` — Enter accepts and exits (like Ctrl-D)
 - `--vim` — vim keybindings (see below)
 
 On accept (Ctrl-D) the final arguments are printed to stdout — cancelling

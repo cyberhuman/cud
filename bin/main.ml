@@ -13,8 +13,8 @@ let print_args mode args command =
         args
   | `Command -> print_endline command
 
-let run ~initial ~manual ~debounce ~single ~vim ~placeholder ~output cmdline
-    =
+let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~placeholder
+    ~output cmdline =
   let cmd, fixed_args =
     match cmdline with [] -> (None, []) | cmd :: rest -> (Some cmd, rest)
   in
@@ -30,6 +30,7 @@ let run ~initial ~manual ~debounce ~single ~vim ~placeholder ~output cmdline
       debounce;
       single;
       vim;
+      enter_accept;
     }
   in
   match Lwt_main.run (Cud_lib.Tui.run opts) with
@@ -105,6 +106,12 @@ let vim =
           "Vim keybindings: Escape switches between insert and normal mode \
            (motions, d/c operators, x, r, p, u, j/k scrolling, ...).")
 
+let enter_accept =
+  Arg.(
+    value & flag
+    & info [ "e"; "enter-accept" ]
+        ~doc:"Enter accepts the arguments and exits (like Ctrl-D) instead of re-running.")
+
 let placeholder =
   Arg.(
     value & opt (some string) None
@@ -155,10 +162,12 @@ let cmd =
     and+ debounce
     and+ single
     and+ vim
+    and+ enter_accept
     and+ placeholder
     and+ output
     and+ cmdline in
-    run ~initial ~manual ~debounce ~single ~vim ~placeholder ~output cmdline
+    run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~placeholder
+      ~output cmdline
   in
   Cmd.v (Cmd.info "cud" ~doc ~man) term
 

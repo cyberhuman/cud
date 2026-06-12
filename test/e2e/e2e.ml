@@ -555,6 +555,23 @@ let test_accept_exit_code () =
   send sess (ctrl 'd');
   expect_exit sess 0
 
+let test_enter_accept () =
+  let sess =
+    spawn "enter-accept"
+      (Printf.sprintf "printf '' | %s --debounce 0.05 -e -- echo hi"
+         (quote cud))
+  in
+  expect_row sess 1 "hi";
+  send sess "there";
+  expect_row sess 1 "hi there";
+  send sess enter;
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "there") then begin
+    incr failures;
+    Printf.printf "FAIL enter-accept: printed %S\n" printed
+  end
+
 let test_cancel_silent () =
   let sess =
     spawn "cancel-silent"
@@ -607,6 +624,7 @@ let () =
       ("placeholder", test_placeholder);
       ("cancel-silent", test_cancel_silent);
       ("accept-exit-code", test_accept_exit_code);
+      ("enter-accept", test_enter_accept);
     ]
   in
   List.iter

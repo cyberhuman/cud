@@ -139,6 +139,11 @@ let model_tests () =
   (match Model.handle_key ~view_h:5 m Model.Enter with
   | Model.Continue (_, [ Model.Start_run ]) -> ()
   | _ -> fail "model.enter" "Enter should request Start_run");
+  let ea =
+    Model.create ~enter_accept:true ~cmd:"jq" ~fixed_args:[] ~initial:"" ()
+  in
+  check "model.enter-accept"
+    (Model.handle_key ~view_h:5 ea Model.Enter = Model.Accept_exit);
   check "model.accept" (Model.handle_key ~view_h:5 m Model.Accept = Model.Accept_exit);
   check "model.quit" (Model.handle_key ~view_h:5 m Model.Quit = Model.Quit_exit);
 
