@@ -427,6 +427,15 @@ let render_tests () =
     (String.trim (List.nth rows 5) |> fun s ->
      String.sub s (String.length s - 7) 7);
 
+  (* the prompt shows the fixed args, shell-quoted *)
+  let mf =
+    Model.create ~cmd:"jq" ~fixed_args:[ "-r"; ".x | .y" ] ~initial:"" ()
+  in
+  let frame = Render.render ~w:30 ~h:3 mf in
+  check_str "render.fixed-args-prompt" "jq -r '.x | .y'>"
+    (String.trim (List.nth (Render.to_strings frame) 0));
+  check "render.fixed-args-cursor" (frame.Render.cursor = Some (17, 0));
+
   (* horizontal scrolling keeps the cursor on screen *)
   let long =
     Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"abcdefghij" ()

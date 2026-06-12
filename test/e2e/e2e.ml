@@ -399,7 +399,7 @@ let test_fixed_args_and_lines_output () =
       (Printf.sprintf "printf '' | %s --debounce 0.05 -l -- echo hello"
          (quote cud))
   in
-  expect_row sess 0 "echo>";
+  expect_row sess 0 "echo hello>";
   expect_row sess 1 "hello";
   send sess "world \"two words\"";
   expect_row sess 1 "hello world two words";

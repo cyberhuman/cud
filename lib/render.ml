@@ -108,7 +108,10 @@ let style_of_kind = function
 
 let input_row ~w (m : Model.t) =
   let prompt =
-    sanitize_flat (match m.cmd with Some c -> c ^ "> " | None -> "> ")
+    sanitize_flat
+      (match m.cmd with
+      | Some c -> Shellwords.join_command (c :: m.fixed_args) ^ "> "
+      | None -> "> ")
   in
   (* Keep at least one column for the text on absurdly narrow terminals. *)
   let plen = min (ulength prompt) (max 0 (w - 1)) in
