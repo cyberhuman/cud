@@ -80,6 +80,7 @@ type vim_pending =
   | P_find of { back : bool; op : char option }
   | P_replace
   | P_g
+  | P_z
 
 type focus = F_args | F_fixed | F_output
 (** [F_output] (multiline mode only): the output viewport has the focus and
@@ -508,7 +509,62 @@ let word_fwd_pos ed =
   while !i < len && blank !i do incr i done;
   !i
 
-(* End-of-word position (vim 'e', WORD-wise): the last character of the
+(* vim's small-word character classes: blanks separate everything; word
+   characters (alphanumerics, '_', non-ASCII) and punctuation form distinct
+   runs. *)
+type wclass = C_blank | C_word | C_punct
+
+let wclass u =
+  if Editor.is_blank u then C_blank
+  else
+    let c = Uchar.to_int u in
+    if
+      (c >= 0x30 && c <= 0x39)
+      || (c >= 0x41 && c <= 0x5a)
+      || (c >= 0x61 && c <= 0x7a)
+      || c = 0x5f || c >= 0x80
+    then C_word
+    else C_punct
+
+(* Start of the next small word (vim 'w'). *)
+let small_fwd_pos ed =
+  let us = uchars_array ed in
+  let len = Array.length us in
+  let i = ref (Editor.cursor ed) in
+  if !i < len then begin
+    let k = wclass us.(!i) in
+    if k <> C_blank then
+      while !i < len && wclass us.(!i) = k do incr i done;
+    while !i < len && wclass us.(!i) = C_blank do incr i done
+  end;
+  !i
+
+(* End of the current/next small word (vim 'e'). *)
+let small_end_pos ed =
+  let us = uchars_array ed in
+  let len = Array.length us in
+  let i = ref (Editor.cursor ed + 1) in
+  while !i < len && wclass us.(!i) = C_blank do incr i done;
+  if !i >= len then max 0 (len - 1)
+  else begin
+    let k = wclass us.(!i) in
+    while !i + 1 < len && wclass us.(!i + 1) = k do incr i done;
+    !i
+  end
+
+(* Start of the previous small word (vim 'b'). *)
+let small_back_pos ed =
+  let us = uchars_array ed in
+  let i = ref (Editor.cursor ed - 1) in
+  while !i >= 0 && wclass us.(!i) = C_blank do decr i done;
+  if !i < 0 then 0
+  else begin
+    let k = wclass us.(!i) in
+    while !i - 1 >= 0 && wclass us.(!i - 1) = k do decr i done;
+    max 0 !i
+  end
+
+(* End-of-word position (vim 'E', WORD-wise): the last character of the
    current/next word. *)
 let word_end_pos ed =
   let us = uchars_array ed in
@@ -632,10 +688,14 @@ let operator_span t ~op motion =
   let cur = Editor.cursor ed in
   let len = Editor.length ed in
   match motion with
-  | `W when op = 'c' -> Some (cur, word_end_pos ed + 1)
-  | `W -> Some (cur, word_fwd_pos ed)
-  | `B -> Some (Editor.cursor (Editor.word_left ed), cur)
-  | `E -> Some (cur, word_end_pos ed + 1)
+  | `W when op = 'c' -> Some (cur, small_end_pos ed + 1) (* cw acts as ce *)
+  | `W -> Some (cur, small_fwd_pos ed)
+  | `B -> Some (small_back_pos ed, cur)
+  | `E -> Some (cur, small_end_pos ed + 1)
+  | `WW when op = 'c' -> Some (cur, word_end_pos ed + 1) (* cW acts as cE *)
+  | `WW -> Some (cur, word_fwd_pos ed)
+  | `BB -> Some (Editor.cursor (Editor.word_left ed), cur)
+  | `EE -> Some (cur, word_end_pos ed + 1)
   | `H -> Some (cur - 1, cur)
   | `L -> Some (cur, cur + 1)
   | `Zero -> Some (0, cur)
@@ -656,6 +716,9 @@ let motion_of_char c =
   | 'w' -> Some `W
   | 'b' -> Some `B
   | 'e' -> Some `E
+  | 'W' -> Some `WW
+  | 'B' -> Some `BB
+  | 'E' -> Some `EE
   | 'h' -> Some `H
   | 'l' -> Some `L
   | '0' | '^' -> Some `Zero
@@ -702,8 +765,10 @@ let vim_normal ~view_h t input =
       | Some m -> vim_apply_op clear_pending ~op m
       | None -> Continue (clear_pending, []))
   | P_g, _, Some 'g' -> handle_key ~view_h clear_pending Scroll_top
-  | (P_replace | P_find _ | P_op _ | P_g), I_special S_escape, _
-  | (P_replace | P_find _ | P_op _ | P_g), _, _ ->
+  | P_z, _, Some 'Z' -> Accept_exit (* ZZ: accept and exit *)
+  | P_z, _, Some 'Q' -> Quit_exit (* ZQ: cancel *)
+  | (P_replace | P_find _ | P_op _ | P_g | P_z), I_special S_escape, _
+  | (P_replace | P_find _ | P_op _ | P_g | P_z), _, _ ->
       Continue (clear_pending, [])
   (* no pending: normal-mode commands *)
   | P_none, I_special S_escape, _ -> Continue (t, [])
@@ -719,9 +784,12 @@ let vim_normal ~view_h t input =
       | 'l' -> motion_to (cur + 1)
       | '0' | '^' -> motion_to 0
       | '$' -> motion_to (max 0 (len - 1))
-      | 'w' -> motion_to (word_fwd_pos ed)
-      | 'b' -> motion_to (Editor.cursor (Editor.word_left ed))
-      | 'e' -> motion_to (word_end_pos ed)
+      | 'w' -> motion_to (small_fwd_pos ed)
+      | 'b' -> motion_to (small_back_pos ed)
+      | 'e' -> motion_to (small_end_pos ed)
+      | 'W' -> motion_to (word_fwd_pos ed)
+      | 'B' -> motion_to (Editor.cursor (Editor.word_left ed))
+      | 'E' -> motion_to (word_end_pos ed)
       | 'x' -> if len = 0 then Continue (t, []) else vim_delete_span t cur (cur + 1)
       | 'X' -> if cur = 0 then Continue (t, []) else vim_delete_span t (cur - 1) cur
       | 'D' -> vim_delete_span t cur len
@@ -741,6 +809,7 @@ let vim_normal ~view_h t input =
       | 'k' -> handle_key ~view_h t Scroll_up
       | 'G' -> handle_key ~view_h t Scroll_bottom
       | 'g' -> Continue ({ t with vpending = P_g }, [])
+      | 'Z' -> Continue ({ t with vpending = P_z }, [])
       | _ -> Continue (t, []))
   | P_none, _, None -> (
       (* control/special keys keep their emacs meaning in normal mode *)

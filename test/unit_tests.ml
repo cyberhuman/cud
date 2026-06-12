@@ -451,6 +451,50 @@ let vim_tests () =
   check_int "vim.gg" 0 (apply n30 (chars "Ggg")).Model.scroll;
   check_int "vim.k" 0 (apply n30 (chars "jk")).Model.scroll;
 
+  (* small-word vs WORD motions on punctuation-heavy text *)
+  let pw = apply (mk ".foo[0] bar-baz") [ esc; Model.I_char (Uchar.of_char '0') ] in
+  check_int "vim.w-small" 1 (cur (apply pw (chars "w")));
+  check_int "vim.w-small2" 4 (cur (apply pw (chars "ww")));
+  check_int "vim.W-WORD" 8 (cur (apply pw (chars "W")));
+  check_int "vim.e-small" 3 (cur (apply pw (chars "we")));
+  check_int "vim.E-WORD" 6 (cur (apply pw (chars "E")));
+  check_int "vim.B-WORD" 0 (cur (apply pw (chars "WB")));
+  check_int "vim.b-small" 11 (cur (apply pw (chars "WWbb")));
+  let dW = apply pw (chars "dW") in
+  check_str "vim.dW" "bar-baz" (text dW);
+  check_str "vim.dW-register" ".foo[0] " dW.Model.register;
+  let dw_small = apply pw (chars "dw") in
+  check_str "vim.dw-small" "foo[0] bar-baz" (text dw_small);
+  let cW = apply pw (chars "cW") in
+  check_str "vim.cW" " bar-baz" (text cW);
+  check "vim.cW-insert" (cW.Model.vmode = Model.V_insert);
+
+  (* ZZ accepts, ZQ cancels *)
+  check "vim.ZZ"
+    (match
+       Model.handle_input ~view_h:5
+         (apply n [ Model.I_char (Uchar.of_char 'Z') ])
+         (Model.I_char (Uchar.of_char 'Z'))
+     with
+    | Model.Accept_exit -> true
+    | _ -> false);
+  check "vim.ZQ"
+    (match
+       Model.handle_input ~view_h:5
+         (apply n [ Model.I_char (Uchar.of_char 'Z') ])
+         (Model.I_char (Uchar.of_char 'Q'))
+     with
+    | Model.Quit_exit -> true
+    | _ -> false);
+  check "vim.Z-other-clears"
+    (match
+       Model.handle_input ~view_h:5
+         (apply n [ Model.I_char (Uchar.of_char 'Z') ])
+         (Model.I_char (Uchar.of_char 'x'))
+     with
+    | Model.Continue (m, []) -> m.Model.vpending = Model.P_none
+    | _ -> false);
+
   (* exits: Esc never quits in vim mode; C-c and C-d still do *)
   check "vim.esc-no-quit"
     (match Model.handle_input ~view_h:5 n esc with

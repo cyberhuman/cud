@@ -160,14 +160,16 @@ output.
 Starts in insert mode (all keys above work there); Escape enters normal
 mode, shown in the status bar:
 
-- motions: `h` `l` `0` `^` `$` `w` `b` `e` `f`*c* `F`*c* (WORD-wise)
+- motions: `h` `l` `0` `^` `$` `f`*c* `F`*c*; `w` `b` `e` move by word
+  (punctuation-aware), `W` `B` `E` by whitespace-delimited WORD
 - edits: `x` `X` `s` `r`*c* `D` `C` `dd` `cc`, operators `d`/`c` with any
   motion (`cw` behaves like `ce`, as in vim)
 - `i` `a` `I` `A` enter insert mode (`-M`: also `o`/`O` to open a line
   below/above); `p`/`P` paste the register;
   `u`/`C-r` undo/redo
 - output scrolling: `j` `k` `G` `gg`
-- Enter re-runs; C-d accepts; C-c cancels (Escape never quits in vim mode)
+- Enter re-runs; `ZZ` or C-d accepts; `ZQ` or C-c cancels (Escape never
+  quits in vim mode)
 
 ## Build & test
 
