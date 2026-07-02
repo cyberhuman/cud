@@ -157,6 +157,11 @@ let parse_escape t s i n =
         in
         scan (i + 2)
     | '(' | ')' -> if i + 2 >= n then None else Some (i + 3)
+    | 'E' ->
+        (* NEL, the row separator notty emits between image lines *)
+        t.cx <- 0;
+        line_feed t;
+        Some (i + 2)
     | _ -> Some (i + 2)
 
 let feed t bytes =
