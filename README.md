@@ -41,9 +41,14 @@ splices the words in place of `{}`, and a fixed argument that merely contains
 `STR` (e.g. `--glob '*.{}'`) gets it substituted as text.
 
 The fixed command line — including the command itself — is editable too:
-Tab moves the cursor into the region before the `>` and back; all editing
-keys (and vim mode) work there, and changes re-run. Emptying it makes the args line the whole command, and
-vice versa: started bare, Tab lets you add a command prefix.
+Shift-Tab moves the cursor into the region before the `>` (Tab moves back);
+all editing keys (and vim mode) work there, and changes re-run. Emptying it
+makes the args line the whole command, and vice versa: started bare,
+Shift-Tab lets you add a command prefix.
+
+The focus follows the layout: Shift-Tab moves it toward the fixed command,
+Tab toward the output, stopping at the ends. With the output focused the
+cursor hides, Up/Down and PgUp/PgDn scroll, and printable keys are ignored.
 
 `CMD` itself is optional: with no command at all the input line *is* the
 command line (its first word is the program; in single-argument mode the
@@ -91,7 +96,7 @@ Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
 | Key | Action |
 | --- | --- |
 | printable chars | edit the argument line |
-| Tab | move the cursor between the args field and the fixed args (and the output with `-M`) |
+| Tab / Shift-Tab | move the focus toward the output / toward the fixed command |
 | Alt-Enter, C-o | accept/run, bypassing the multiline line break |
 | Left/Right, C-b/C-f, Home/End, C-a/C-e | move cursor |
 | M-b/M-f, C-Left/C-Right | move by word |
@@ -162,9 +167,6 @@ kubectl get pods -o json | cud -M -1 jq
 - Up/Down (and vim `j`/`k`) move the cursor across the input lines,
   preserving the column where possible; PgUp/PgDn — and Ctrl/Shift+Up/Down —
   still scroll the output
-- Tab cycles the focus: args → fixed args → output → args (the fixed-args
-  stop is skipped when there is no fixed command); with the output focused,
-  Up/Down and PgUp/PgDn scroll it and printable keys are ignored
 - the input area grows with the text up to a third of the screen, then
   scrolls vertically to follow the cursor; continuation lines are shown
   indented by two spaces

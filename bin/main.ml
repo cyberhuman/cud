@@ -188,10 +188,9 @@ let multiline =
     & info [ "M"; "multiline" ]
         ~doc:
           "Multi-line argument editor: Enter inserts a line break (the \
-           accept/re-run keys become Alt-Enter or Ctrl-O), Up/Down move the \
-           cursor across lines while Ctrl/Shift+Up/Down scroll the output, \
-           and Tab cycles the focus through the args, the fixed args and \
-           the output (where Up/Down scroll).")
+           accept/re-run keys become Alt-Enter or Ctrl-O), and Up/Down move \
+           the cursor across lines while Ctrl/Shift+Up/Down scroll the \
+           output.")
 
 let ansi =
   Arg.(
@@ -239,6 +238,10 @@ let cmd =
         "With $(b,--pipe) the positional arguments form a shell pipeline, \
          one editable step per line: $(b,ps aux | cud -p -- 'grep ssh' 'wc \
          -l').";
+      `P
+        "Tab moves the focus toward the output, Shift-Tab toward the \
+         (editable) fixed command line; the output scrolls with Up/Down \
+         while focused.";
       `P
         "On exit the arguments from the editor are printed to stdout \
          (shell-quoted by default; see $(b,--quiet), $(b,--lines), \

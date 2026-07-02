@@ -241,10 +241,11 @@ let model_tests () =
   check "model.ph-single"
     (Model.command ph_single = Ok (Some ("jq", [ ".x | .y"; "-c" ])));
 
-  (* editable fixed args: Tab switches focus, edits re-run with new fixed *)
+  (* editable fixed args: Shift-Tab moves the focus there, edits re-run with
+     the new fixed line *)
   let mf = Model.create ~cmd:"echo" ~fixed_args:[ "AA"; "BB" ] ~initial:"x" () in
   check "model.focus-starts-args" (mf.Model.focus = Model.F_args);
-  (match Model.handle_key ~view_h:5 mf Model.Toggle_focus with
+  (match Model.handle_key ~view_h:5 mf Model.Focus_prev with
   | Model.Continue (mf, []) -> (
       check "model.focus-fixed" (mf.Model.focus = Model.F_fixed);
       match
@@ -262,10 +263,10 @@ let model_tests () =
           | _ -> fail "model.fixed-parse" "unexpected reaction")
       | _ -> fail "model.fixed-edit" "unexpected reaction")
   | _ -> fail "model.focus" "Tab should continue");
-  (* even with no fixed command, Tab reaches the (empty) fixed field, so a
-     command prefix can be added interactively *)
+  (* even with no fixed command, Shift-Tab reaches the (empty) fixed field,
+     so a command prefix can be added interactively *)
   let nc2 = Model.create ~fixed_args:[] ~initial:"" () in
-  (match Model.handle_key ~view_h:5 nc2 Model.Toggle_focus with
+  (match Model.handle_key ~view_h:5 nc2 Model.Focus_prev with
   | Model.Continue (m, []) -> (
       check "model.focus-nocmd" (m.Model.focus = Model.F_fixed);
       let m =
@@ -293,7 +294,7 @@ let model_tests () =
         | _ -> m)
       cm
       [
-        Model.Toggle_focus; Model.Home; Model.Delete; Model.Delete;
+        Model.Focus_prev; Model.Home; Model.Delete; Model.Delete;
         Model.Delete; Model.Delete;
         Model.Insert (Uchar.of_char 'c');
         Model.Insert (Uchar.of_char 'a');
@@ -312,10 +313,27 @@ let model_tests () =
   let mfoc = Model.create ~cmd:"echo" ~fixed_args:[ "hi" ] ~initial:"" () in
   let bar m = List.nth (Render.to_strings (Render.render ~w:60 ~h:4 m)) 3 in
   check "model.no-fixed-indicator" (not (contains (bar mfoc) "[fixed]"));
-  (match Model.handle_key ~view_h:5 mfoc Model.Toggle_focus with
+  (match Model.handle_key ~view_h:5 mfoc Model.Focus_prev with
   | Model.Continue (m, _) ->
       check "model.fixed-indicator" (contains (bar m) "[fixed]")
   | _ -> fail "model.fixed-indicator" "unexpected reaction");
+
+  (* the output is focusable in single-line mode too: Tab reaches it, the
+     cursor hides, Shift-Tab returns *)
+  (match Model.handle_key ~view_h:5 mfoc Model.Focus_next with
+  | Model.Continue (so, []) -> (
+      check "model.tab-output-singleline" (so.Model.focus = Model.F_output);
+      check "model.output-cursor-hidden"
+        ((Render.render ~w:30 ~h:5 so).Render.cursor = None);
+      check "model.tab-clamps-at-output"
+        (match Model.handle_key ~view_h:5 so Model.Focus_next with
+        | Model.Continue (so', []) -> so'.Model.focus = Model.F_output
+        | _ -> false);
+      match Model.handle_key ~view_h:5 so Model.Focus_prev with
+      | Model.Continue (so, []) ->
+          check "model.backtab-back-to-args" (so.Model.focus = Model.F_args)
+      | _ -> fail "model.backtab-back" "unexpected reaction")
+  | _ -> fail "model.tab-output" "unexpected reaction");
 
   (* Left/Right never switch fields: motions stop at the field edges *)
   let bx = Model.create ~cmd:"echo" ~fixed_args:[ "AA" ] ~initial:"x" () in
@@ -582,7 +600,7 @@ let render_tests () =
     Model.create ~cmd:"echo" ~fixed_args:[ "AA" ] ~initial:"zz" ()
   in
   let mf2 =
-    match Model.handle_key ~view_h:5 mf2 Model.Toggle_focus with
+    match Model.handle_key ~view_h:5 mf2 Model.Focus_prev with
     | Model.Continue (m, _) -> m
     | _ -> mf2
   in
@@ -635,7 +653,7 @@ let multiline_tests () =
   check "ml.newline-disabled"
     (Editor.to_string (Model.editor (key sl Model.Newline)) = ".a");
   (* a newline never lands in the fixed-args field *)
-  let mfx = keys m [ Model.Toggle_focus; Model.Newline ] in
+  let mfx = keys m [ Model.Focus_prev; Model.Newline ] in
   check_str "ml.no-newline-in-fixed" "jq" (Model.fixed_text mfx);
 
   (* Up/Down move across lines, clamping the column *)
@@ -661,21 +679,24 @@ let multiline_tests () =
   let m30 = with_lines 30 m3 in
   check_int "ml.pgdn-scrolls" 5 (key m30 Model.Page_down).Model.scroll;
 
-  (* Tab cycles args -> fixed -> output -> args *)
-  let f1 = key m3 Model.Toggle_focus in
-  check "ml.tab-fixed" (f1.Model.focus = Model.F_fixed);
-  let f2 = key f1 Model.Toggle_focus in
+  (* Tab moves toward the output, Shift-Tab toward the fixed command, both
+     stopping at the ends *)
+  let f1 = key m3 Model.Focus_prev in
+  check "ml.backtab-fixed" (f1.Model.focus = Model.F_fixed);
+  check "ml.backtab-clamps"
+    ((key f1 Model.Focus_prev).Model.focus = Model.F_fixed);
+  let f0 = key f1 Model.Focus_next in
+  check "ml.tab-back-args" (f0.Model.focus = Model.F_args);
+  let f2 = key f0 Model.Focus_next in
   check "ml.tab-output" (f2.Model.focus = Model.F_output);
-  let f3 = key f2 Model.Toggle_focus in
-  check "ml.tab-args" (f3.Model.focus = Model.F_args);
-  (* with no fixed command the (empty) fixed field is still in the cycle *)
+  check "ml.tab-clamps" ((key f2 Model.Focus_next).Model.focus = Model.F_output);
+  check "ml.backtab-args" ((key f2 Model.Focus_prev).Model.focus = Model.F_args);
+  (* with no fixed command the (empty) fixed field is still reachable *)
   let nc = Model.create ~multiline:true ~fixed_args:[] ~initial:"" () in
-  let nf1 = key nc Model.Toggle_focus in
-  check "ml.tab-nocmd-fixed" (nf1.Model.focus = Model.F_fixed);
-  let nf2 = key nf1 Model.Toggle_focus in
-  check "ml.tab-nocmd-output" (nf2.Model.focus = Model.F_output);
-  check "ml.tab-nocmd-args"
-    ((key nf2 Model.Toggle_focus).Model.focus = Model.F_args);
+  let nf1 = key nc Model.Focus_prev in
+  check "ml.backtab-nocmd-fixed" (nf1.Model.focus = Model.F_fixed);
+  check "ml.tab-nocmd-output"
+    ((key nc Model.Focus_next).Model.focus = Model.F_output);
 
   (* focus on the output: Up/Down scroll, typing is ignored, C-d/C-c work *)
   let out = with_lines 30 f2 in
@@ -707,7 +728,7 @@ let multiline_tests () =
     | _ -> false);
 
   (* the output focus hides the cursor and shows up in the status bar *)
-  let foc = key (key m Model.Toggle_focus) Model.Toggle_focus in
+  let foc = key m Model.Focus_next in
   check "ml.output-focus" (foc.Model.focus = Model.F_output);
   check "ml.output-cursor-hidden"
     ((Render.render ~w:40 ~h:8 foc).Render.cursor = None);
@@ -1177,7 +1198,7 @@ let render_invariants () =
            ~initial:".a\n|.b\n|.c" ()
        in
        let m = { (with_lines 40 m) with Model.scroll = 12 } in
-       match Model.handle_key ~view_h:5 m Model.Toggle_focus with
+       match Model.handle_key ~view_h:5 m Model.Focus_prev with
        | Model.Continue (m, _) -> m
        | _ -> m);
       (let m =

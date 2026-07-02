@@ -18,6 +18,7 @@ let pgup = "\x1b[5~"
 let pgdn = "\x1b[6~"
 let ctrl_right = "\x1b[1;5C"
 let meta_b = "\x1bb"
+let backtab = "\x1b[Z" (* Shift+Tab *)
 let enter = "\r"
 
 type sess = {
@@ -599,8 +600,8 @@ let test_edit_fixed () =
   expect_row sess 0 "echo AA BB>";
   expect_row sess 1 "AA BB";
   expect_cursor sess (12, 0);
-  (* Tab moves the cursor into the fixed-args region (end of "AA BB") *)
-  send sess "\t";
+  (* Shift-Tab moves the cursor into the fixed-args region (end of "AA BB") *)
+  send sess backtab;
   expect_cursor sess (10, 0);
   expect_status sess "[fixed]";
   send sess " CC";
@@ -613,9 +614,9 @@ let test_edit_fixed () =
   send sess "\t";
   send sess "x";
   expect_row sess 1 "AA BB x";
-  (* edits work anywhere inside the fixed args: Tab in, then move with
-     plain motions (Left/Right never switch fields) *)
-  send sess "\t";
+  (* edits work anywhere inside the fixed args: Shift-Tab in, then move
+     with plain motions (Left/Right never switch fields) *)
+  send sess backtab;
   expect_cursor sess (11, 0) (* C-w left "AA BB " with a trailing space *);
   send sess left;
   send sess left;
@@ -763,10 +764,12 @@ let test_multiline () =
   send sess end_;
   expect_cursor sess (5, 1);
 
-  (* Tab cycles args -> fixed -> output *)
-  send sess "\t";
+  (* Shift-Tab reaches the fixed command; Tab heads back toward the output *)
+  send sess backtab;
   expect_cursor sess (2, 0) (* end of the editable command "jq" *);
-  send sess "\t";
+  send sess "\t" (* fixed -> args *);
+  expect_cursor sess (5, 1);
+  send sess "\t" (* args -> output *);
   (* output focused: the cursor is hidden, the status bar says so, Up/Down
      scroll, the input stays put *)
   expect_cursor_hidden sess;
@@ -779,8 +782,8 @@ let test_multiline () =
   send sess up;
   expect_status sess "11-31/32";
 
-  (* Tab returns to the args; typing edits again *)
-  send sess "\t";
+  (* Shift-Tab returns to the args; typing edits again *)
+  send sess backtab;
   expect_cursor sess (5, 1);
   send sess "%";
   expect_row sess 1 "  |.b%";
@@ -856,8 +859,7 @@ let test_ctrl_o_submit () =
   expect_row sess 1 "hi";
   send sess "x";
   expect_row sess 0 "echo hi> x";
-  send sess "\t" (* args -> fixed *);
-  send sess "\t" (* fixed -> output *);
+  send sess "\t" (* args -> output *);
   send sess "\x0f";
   expect_exit sess 0;
   let printed = printed_after_release sess in
@@ -865,6 +867,33 @@ let test_ctrl_o_submit () =
     incr failures;
     Printf.printf "FAIL ctrl-o-output: printed %S\n" printed
   end
+
+let test_tab_output_single_line () =
+  (* the output is focusable outside multiline mode too *)
+  let sess =
+    spawn "tab-output"
+      (Printf.sprintf "seq 1 50 | %s --debounce 0.05 cat" (quote cud))
+  in
+  expect_status sess "1-22/50";
+  send sess "\t";
+  expect_status sess "[output]";
+  expect_cursor_hidden sess;
+  send sess down;
+  expect_status sess "2-23/50";
+  (* typing is ignored with the output focused *)
+  send sess "x";
+  pump sess ~wait:0.2;
+  expect_row sess 0 "cat>";
+  (* Shift-Tab returns to the args, twice more reaches the command *)
+  send sess backtab;
+  expect_cursor sess (5, 0);
+  send sess "y";
+  expect_row sess 0 "cat> y";
+  send sess backtab;
+  expect_status sess "[fixed]";
+  expect_cursor sess (3, 0);
+  send sess (ctrl 'c');
+  expect_exit sess 130
 
 let test_pipe () =
   let sess =
@@ -1008,6 +1037,7 @@ let () =
       ("enter-accept", test_enter_accept);
       ("output-on-exit", test_output_on_exit);
       ("edit-fixed", test_edit_fixed);
+      ("tab-output", test_tab_output_single_line);
       ("ansi", test_ansi);
       ("no-ansi", test_no_ansi);
       ("multiline", test_multiline);

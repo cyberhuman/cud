@@ -32,7 +32,8 @@ type key =
           the multiline newline binding *)
   | Toggle_single
   | Toggle_ansi
-  | Toggle_focus
+  | Focus_next  (** Tab: move the focus toward the output *)
+  | Focus_prev  (** Shift-Tab: move the focus toward the fixed command *)
   | Step_prev  (** focus the previous/next pipeline step ([--pipe]) *)
   | Step_next
   | Scroll_up
@@ -66,6 +67,7 @@ type ispecial =
   | S_ctrl_left
   | S_ctrl_right
   | S_tab
+  | S_backtab  (** Shift+Tab (CSI Z) *)
   | S_escape
 
 type input =
@@ -85,8 +87,7 @@ type vim_pending =
   | P_z
 
 type focus = F_args | F_fixed | F_output
-(** [F_output] (multiline mode only): the output viewport has the focus and
-    Up/Down scroll it. *)
+(** [F_output]: the output viewport has the focus and Up/Down scroll it. *)
 
 (** A second-pane section ([--lens]/[--hint]): a command run with [sh -c]
     over the main command's latest output. Hints additionally re-run as the
@@ -504,21 +505,22 @@ let handle_key ~view_h t key =
         (* landing on another step puts the cursor in its args line *)
         let focus = match t.focus with F_output -> F_args | f -> f in
         Continue ({ t with cur = target; focus; vpending = P_none }, [])
-  | Toggle_focus ->
+  | Focus_next | Focus_prev ->
+      (* the regions in on-screen order — fixed command, args, output; Tab
+         moves toward the output, Shift-Tab toward the command, stopping at
+         the ends *)
       let focus =
-        if t.multiline then
-          (* F_args -> F_fixed -> F_output -> F_args, skipping the fixed
-             field when there is no fixed command *)
+        if key = Focus_next then
           match t.focus with
-          | F_args -> F_fixed
-          | F_fixed -> F_output
-          | F_output -> F_args
+          | F_fixed -> F_args
+          | F_args | F_output -> F_output
         else
           match t.focus with
-          | F_args -> F_fixed
-          | F_fixed | F_output -> F_args
+          | F_output -> F_args
+          | F_args | F_fixed -> F_fixed
       in
-      Continue ({ t with focus; vpending = P_none }, [])
+      if focus = t.focus then Continue (t, [])
+      else Continue ({ t with focus; vpending = P_none }, [])
   | Scroll_up ->
       if t.multiline && t.focus = F_args then
         with_motion t (cursor_vert ~dir:(-1) ed)
@@ -586,7 +588,8 @@ let emacs_action ~pipe input : key option =
       | S_pgdn -> Some Page_down
       | S_ctrl_left -> Some Word_left
       | S_ctrl_right -> Some Word_right
-      | S_tab -> Some Toggle_focus
+      | S_tab -> Some Focus_next
+      | S_backtab -> Some Focus_prev
       | S_escape -> Some Quit)
 
 (* --- input interpretation: vim layer --- *)
@@ -927,9 +930,9 @@ let vim_normal ~view_h t input =
       | Some (Insert _) | None -> Continue (t, [])
       | Some key -> handle_key ~view_h t key)
 
-(* With the output focused (multiline mode), editing keys are ignored:
-   Up/Down and PgUp/PgDn scroll, Tab moves on, and the global keys (Enter,
-   C-t, C-d, C-c, ...) keep working. *)
+(* With the output focused, editing keys are ignored: Up/Down and PgUp/PgDn
+   scroll, Shift-Tab moves back, and the global keys (Enter, C-t, C-d, C-c,
+   ...) keep working. *)
 let handle_output_focus ~view_h t input =
   match input with
   | I_special S_escape when t.vim ->
@@ -940,8 +943,8 @@ let handle_output_focus ~view_h t input =
       | Some
           (( Scroll_up | Scroll_down | Scroll_output_up | Scroll_output_down
            | Page_up | Page_down | Toggle_single | Toggle_ansi
-           | Toggle_focus | Step_prev | Step_next | Enter | Submit | Redraw
-           | Accept | Quit ) as key)
+           | Focus_next | Focus_prev | Step_prev | Step_next | Enter | Submit
+           | Redraw | Accept | Quit ) as key)
         ->
           handle_key ~view_h t key
       | _ -> Continue (t, []))
