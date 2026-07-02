@@ -177,6 +177,11 @@ kubectl get pods -o json | cud -M -1 jq
   scrolls vertically to follow the cursor; continuation lines are shown
   indented by two spaces
 
+Combined with `-w`/`--wrap` (Alt-W at runtime), long output lines wrap onto
+continuation rows instead of being cropped — handy with `jq -c`:
+
+![cud multiline and wrap demo: jq -c output wrapping across rows, the Alt-W toggle, then a two-line filter built with Enter](demo-multiline-wrap.gif)
+
 ### Lenses and hints (`--lens`, `--hint`)
 
 With at least one `--lens` or `--hint` the output area splits: the left
