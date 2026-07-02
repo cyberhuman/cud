@@ -33,6 +33,8 @@ type key =
   | Toggle_single
   | Toggle_ansi
   | Toggle_focus
+  | Step_prev  (** focus the previous/next pipeline step ([--pipe]) *)
+  | Step_next
   | Scroll_up
   | Scroll_down
   | Scroll_output_up  (** always scrolls, even when Up/Down move the cursor *)
@@ -92,15 +94,22 @@ type focus = F_args | F_fixed | F_output
     CUD_CMD in their environment. *)
 type pane = { spec : string; hint : bool; plines : line array }
 
-type t = {
-  fixed_editor : Editor.t;
+type step = {
+  fixed : Editor.t;
       (** the fixed command line — program and arguments — as an editable,
           shell-split line; empty means the args line itself is the
           command *)
+  args : Editor.t;
+}
+(** One pipeline step ([--pipe]): its fixed command line and its editable
+    argument line. Without [--pipe] there is exactly one. *)
+
+type t = {
+  steps : step array;  (** the pipeline steps, in order; never empty *)
+  cur : int;  (** index of the step being edited *)
   focus : focus;  (** which editor the cursor is in *)
   placeholder : string option;
       (** xargs -I style: where in [fixed_args] the editable args go *)
-  editor : Editor.t;
   lines : line array;  (** output of the last finished run *)
   panes : pane array;  (** lens/hint sections, lenses first *)
   scroll : int;  (** index of the first visible output line *)
@@ -116,8 +125,8 @@ type t = {
   vmode : vmode;
   vpending : vim_pending;
   register : string;  (** last killed/deleted text, for paste/yank *)
-  undo : (focus * Editor.t) list;
-  redo : (focus * Editor.t) list;
+  undo : (int * focus * Editor.t) list;  (** step index, field, value *)
+  redo : (int * focus * Editor.t) list;
   gen : int;  (** run generation, bumped by [start_run] *)
   edit_seq : int;  (** bumped on every text change, for debouncing *)
 }
@@ -126,42 +135,76 @@ let parse_error_of ~single text =
   if single then None
   else match Shellwords.split text with Ok _ -> None | Error e -> Some e
 
-let fixed_text t = Editor.to_string t.fixed_editor
+let nsteps t = Array.length t.steps
+let cur_step t = t.steps.(t.cur)
+let editor t = (cur_step t).args
+let fixed_editor t = (cur_step t).fixed
+let fixed_text t = Editor.to_string (fixed_editor t)
+
+let set_step t i st =
+  let steps = Array.copy t.steps in
+  steps.(i) <- st;
+  { t with steps }
+
+let set_editor t ed = set_step t t.cur { (cur_step t) with args = ed }
+let set_fixed_editor t ed = set_step t t.cur { (cur_step t) with fixed = ed }
 
 let focused t =
   match t.focus with
-  | F_args | F_output -> t.editor
-  | F_fixed -> t.fixed_editor
+  | F_args | F_output -> editor t
+  | F_fixed -> fixed_editor t
 
 let set_focused t ed =
   match t.focus with
-  | F_args | F_output -> { t with editor = ed }
-  | F_fixed -> { t with fixed_editor = ed }
+  | F_args | F_output -> set_editor t ed
+  | F_fixed -> set_fixed_editor t ed
 
-(** First problem among the two editable lines: the args line, then the
+(** First problem among a step's two editable lines: the args line, then the
     fixed-args line (only meaningful with a fixed command). *)
-let compute_parse_error t =
-  match parse_error_of ~single:t.single (Editor.to_string t.editor) with
+let step_parse_error ~single (st : step) =
+  match parse_error_of ~single (Editor.to_string st.args) with
   | Some _ as e -> e
   | None -> (
-      match Shellwords.split (fixed_text t) with
+      match Shellwords.split (Editor.to_string st.fixed) with
       | Ok _ -> None
       | Error e -> Some e)
 
+(** First problem across all steps, in pipeline order. *)
+let compute_parse_error t =
+  Array.fold_left
+    (fun acc st ->
+      match acc with
+      | Some _ -> acc
+      | None -> step_parse_error ~single:t.single st)
+    None t.steps
+
+(** [steps] ([--pipe]): one [(fixed_line, initial_args)] pair per pipeline
+    step; when empty, a single step is built from [cmd]/[fixed_args]/
+    [initial]. *)
 let create ?cmd ?placeholder ?(single = false) ?(vim = false)
     ?(enter_accept = false) ?(ansi = false) ?(multiline = false)
-    ?(lenses = []) ?(hints = []) ~fixed_args
+    ?(lenses = []) ?(hints = []) ?(steps = []) ~fixed_args
     ~initial () =
-  let fixed_line =
-    Shellwords.join_command
-      (match cmd with Some c -> c :: fixed_args | None -> fixed_args)
+  let mk (fixed_line, init) =
+    { fixed = Editor.of_string fixed_line; args = Editor.of_string init }
+  in
+  let steps =
+    match steps with
+    | [] ->
+        [|
+          mk
+            ( Shellwords.join_command
+                (match cmd with Some c -> c :: fixed_args | None -> fixed_args),
+              initial );
+        |]
+    | l -> Array.of_list (List.map mk l)
   in
   let t =
   {
-    fixed_editor = Editor.of_string fixed_line;
+    steps;
+    cur = 0;
     focus = F_args;
     placeholder;
-    editor = Editor.of_string initial;
     lines = [||];
     panes =
       (let pane hint spec = { spec; hint; plines = [||] } in
@@ -170,7 +213,7 @@ let create ?cmd ?placeholder ?(single = false) ?(vim = false)
     scroll = 0;
     running = false;
     status = None;
-    parse_error = parse_error_of ~single initial;
+    parse_error = None;
     single;
     vim;
     enter_accept;
@@ -226,17 +269,17 @@ let merge_args ~placeholder ~fixed words =
         fixed
   | _ -> fixed @ words
 
-(** What to run: program and arguments, or nothing (empty line and no fixed
-    command), or a parse error. With no fixed command the line itself is the
-    command — its first word in split mode, or [sh -c LINE] in single-arg
-    mode. *)
-let command t =
-  let text = Editor.to_string t.editor in
-  match Shellwords.split (fixed_text t) with
+(** What one step runs: program and arguments, or nothing (empty line and no
+    fixed command), or a parse error. With no fixed command the line itself
+    is the command — its first word in split mode, or [sh -c LINE] in
+    single-arg mode. *)
+let step_command ~single ~placeholder (st : step) =
+  let text = Editor.to_string st.args in
+  match Shellwords.split (Editor.to_string st.fixed) with
   | Error e -> Error e
   | Ok [] ->
       (* no fixed command line: the args line is the whole command *)
-      if t.single then
+      if single then
         if text = "" then Ok None else Ok (Some ("sh", [ "-c"; text ]))
       else (
         match Shellwords.split text with
@@ -244,35 +287,76 @@ let command t =
         | Ok (prog :: args) -> Ok (Some (prog, args))
         | Error e -> Error e)
   | Ok (prog :: fixed) ->
-      let merge words = merge_args ~placeholder:t.placeholder ~fixed words in
-      if t.single then
+      let merge words = merge_args ~placeholder ~fixed words in
+      if single then
         Ok (Some (prog, merge (if text = "" then [] else [ text ])))
       else (
         match Shellwords.split text with
         | Ok words -> Ok (Some (prog, merge words))
         | Error e -> Error e)
 
-(** The arguments the user provided in the editor, for printing at exit. In
-    [single] mode the line is one argument; in split mode an unparseable
-    line is returned as-is, best effort. *)
-let user_args t =
-  let text = Editor.to_string t.editor in
-  if t.single then (if text = "" then [] else [ text ])
+(** What to run. With one step, its command directly; with several
+    ([--pipe]), the non-empty steps joined into a shell pipeline run via
+    [sh -c] (a step still being empty simply drops out). *)
+let command t =
+  let step_command st =
+    step_command ~single:t.single ~placeholder:t.placeholder st
+  in
+  if nsteps t = 1 then step_command t.steps.(0)
+  else
+    let rec frags acc = function
+      | [] -> Ok (List.rev acc)
+      | st :: rest -> (
+          match step_command st with
+          | Error e -> Error e
+          | Ok None -> frags acc rest
+          | Ok (Some (prog, args)) ->
+              frags (Shellwords.join_command (prog :: args) :: acc) rest)
+    in
+    match frags [] (Array.to_list t.steps) with
+    | Error e -> Error e
+    | Ok [] -> Ok None
+    | Ok fs -> Ok (Some ("sh", [ "-c"; String.concat " | " fs ]))
+
+(** The command of the step being edited (for the hint environment). *)
+let current_command t =
+  step_command ~single:t.single ~placeholder:t.placeholder (cur_step t)
+
+(** The arguments the user provided in a step's editor, for printing at
+    exit. In [single] mode the line is one argument; in split mode an
+    unparseable line is returned as-is, best effort. *)
+let step_user_args ~single (st : step) =
+  let text = Editor.to_string st.args in
+  if single then (if text = "" then [] else [ text ])
   else
     match Shellwords.split text with
     | Ok words -> words
     | Error _ -> [ text ]
 
-(** The full command as a shell-quoted string. If the input line doesn't
-    parse, it is appended verbatim. *)
-let command_string t =
-  match command t with
+let user_args t = step_user_args ~single:t.single (cur_step t)
+
+(** Every step's arguments, in pipeline order. *)
+let all_args t =
+  Array.to_list t.steps |> List.map (step_user_args ~single:t.single)
+
+let step_command_string t (st : step) =
+  match step_command ~single:t.single ~placeholder:t.placeholder st with
   | Ok (Some (prog, args)) -> Shellwords.join_command (prog :: args)
   | Ok None -> ""
-  | Error _ -> (
-      let raw = Editor.to_string t.editor in
-      let ft = fixed_text t in
-      if ft = "" then raw else if raw = "" then ft else ft ^ " " ^ raw)
+  | Error _ ->
+      let raw = Editor.to_string st.args in
+      let ft = Editor.to_string st.fixed in
+      if ft = "" then raw else if raw = "" then ft else ft ^ " " ^ raw
+
+(** The full command (pipeline) as a shell-quoted string. If an input line
+    doesn't parse, it is appended verbatim. *)
+let command_string t =
+  if nsteps t = 1 then step_command_string t t.steps.(0)
+  else
+    Array.to_list t.steps
+    |> List.map (step_command_string t)
+    |> List.filter (fun s -> s <> "")
+    |> String.concat " | "
 
 type effect_ = Schedule_rerun | Start_run
 type reaction = Continue of t * effect_ list | Accept_exit | Quit_exit
@@ -290,7 +374,11 @@ let undo_depth = 100
 let take n l = List.filteri (fun i _ -> i < n) l
 
 let push_undo t =
-  { t with undo = take undo_depth ((t.focus, focused t) :: t.undo); redo = [] }
+  {
+    t with
+    undo = take undo_depth ((t.cur, t.focus, focused t) :: t.undo);
+    redo = [];
+  }
 
 (** Apply an edited editor value: snapshot for undo, recompute the parse
     state, request a (debounced) re-run. [register] records killed text. *)
@@ -398,6 +486,16 @@ let handle_key ~view_h t key =
       let t = { t with single = not t.single } in
       Continue ({ t with parse_error = compute_parse_error t }, [ Start_run ])
   | Toggle_ansi -> Continue ({ t with ansi = not t.ansi }, [])
+  | Step_prev | Step_next ->
+      let target =
+        let d = if key = Step_next then 1 else -1 in
+        max 0 (min (nsteps t - 1) (t.cur + d))
+      in
+      if target = t.cur then Continue (t, [])
+      else
+        (* landing on another step puts the cursor in its args line *)
+        let focus = match t.focus with F_output -> F_args | f -> f in
+        Continue ({ t with cur = target; focus; vpending = P_none }, [])
   | Toggle_focus ->
       let focus =
         if t.multiline then
@@ -433,7 +531,9 @@ let handle_key ~view_h t key =
 
 (* --- input interpretation: emacs layer --- *)
 
-let emacs_action input : key option =
+(** [pipe]: more than one pipeline step exists, so C-p/C-n switch steps
+    instead of scrolling. *)
+let emacs_action ~pipe input : key option =
   match input with
   | I_char u -> Some (Insert u)
   | I_ctrl c -> (
@@ -446,8 +546,8 @@ let emacs_action input : key option =
       | 'u' -> Some Kill_to_start
       | 'w' -> Some Kill_prev_word
       | 'y' -> Some Yank
-      | 'p' -> Some Scroll_up
-      | 'n' -> Some Scroll_down
+      | 'p' -> Some (if pipe then Step_prev else Scroll_up)
+      | 'n' -> Some (if pipe then Step_next else Scroll_down)
       | 'l' -> Some Redraw
       | 'o' -> Some Submit
       | 't' -> Some Toggle_single
@@ -619,15 +719,15 @@ let vim_paste t ~after =
     with_edit t ed'
   end
 
-let editor_at t f =
-  match f with F_args | F_output -> t.editor | F_fixed -> t.fixed_editor
+let editor_at t i f =
+  match f with F_args | F_output -> t.steps.(i).args | F_fixed -> t.steps.(i).fixed
 
 let vim_undo t =
   match t.undo with
   | [] -> Continue (t, [])
-  | (f, ed) :: rest ->
-      let prev = (f, editor_at t f) in
-      let t = set_focused { t with focus = f } (nclamp ed) in
+  | (i, f, ed) :: rest ->
+      let prev = (i, f, editor_at t i f) in
+      let t = set_focused { t with cur = i; focus = f } (nclamp ed) in
       let t =
         { t with undo = rest; redo = prev :: t.redo; edit_seq = t.edit_seq + 1 }
       in
@@ -636,9 +736,9 @@ let vim_undo t =
 let vim_redo t =
   match t.redo with
   | [] -> Continue (t, [])
-  | (f, ed) :: rest ->
-      let prev = (f, editor_at t f) in
-      let t = set_focused { t with focus = f } (nclamp ed) in
+  | (i, f, ed) :: rest ->
+      let prev = (i, f, editor_at t i f) in
+      let t = set_focused { t with cur = i; focus = f } (nclamp ed) in
       let t =
         {
           t with
@@ -807,13 +907,15 @@ let vim_normal ~view_h t input =
       | 'u' -> vim_undo t
       | 'j' -> handle_key ~view_h t Scroll_down
       | 'k' -> handle_key ~view_h t Scroll_up
+      | 'J' -> handle_key ~view_h t Step_next
+      | 'K' -> handle_key ~view_h t Step_prev
       | 'G' -> handle_key ~view_h t Scroll_bottom
       | 'g' -> Continue ({ t with vpending = P_g }, [])
       | 'Z' -> Continue ({ t with vpending = P_z }, [])
       | _ -> Continue (t, []))
   | P_none, _, None -> (
       (* control/special keys keep their emacs meaning in normal mode *)
-      match emacs_action input with
+      match emacs_action ~pipe:(nsteps t > 1) input with
       | Some (Insert _) | None -> Continue (t, [])
       | Some key -> handle_key ~view_h t key)
 
@@ -826,11 +928,12 @@ let handle_output_focus ~view_h t input =
       (* Escape never quits in vim mode *)
       Continue ({ t with vmode = V_normal; vpending = P_none }, [])
   | _ -> (
-      match emacs_action input with
+      match emacs_action ~pipe:(nsteps t > 1) input with
       | Some
           (( Scroll_up | Scroll_down | Scroll_output_up | Scroll_output_down
            | Page_up | Page_down | Toggle_single | Toggle_ansi
-           | Toggle_focus | Enter | Submit | Redraw | Accept | Quit ) as key)
+           | Toggle_focus | Step_prev | Step_next | Enter | Submit | Redraw
+           | Accept | Quit ) as key)
         ->
           handle_key ~view_h t key
       | _ -> Continue (t, []))
@@ -839,7 +942,7 @@ let handle_output_focus ~view_h t input =
 let handle_input ~view_h t input =
   if t.focus = F_output then handle_output_focus ~view_h t input
   else if not t.vim then
-    match emacs_action input with
+    match emacs_action ~pipe:(nsteps t > 1) input with
     | Some key -> handle_key ~view_h t key
     | None -> Continue (t, [])
   else
@@ -854,7 +957,7 @@ let handle_input ~view_h t input =
             let t = set_focused t (nclamp ed) in
             Continue ({ t with vmode = V_normal }, [])
         | _ -> (
-            match emacs_action input with
+            match emacs_action ~pipe:(nsteps t > 1) input with
             | Some key -> handle_key ~view_h t key
             | None -> Continue (t, [])))
 

@@ -124,7 +124,7 @@ let model_tests () =
   | Model.Continue (m', effects) ->
       check_int "model.insert-bumps-edit_seq" 1 m'.Model.edit_seq;
       check "model.insert-schedules-rerun" (effects = [ Model.Schedule_rerun ]);
-      check_str "model.insert-text" "x" (Editor.to_string m'.Model.editor)
+      check_str "model.insert-text" "x" (Editor.to_string (Model.editor m'))
   | _ -> fail "model.insert" "unexpected reaction");
 
   (* motions and impossible edits don't schedule re-runs *)
@@ -196,9 +196,9 @@ let model_tests () =
   check_str "model.single-command_string" "jq -r '.x | .y'"
     (Model.command_string s);
   check "model.single-no-parse-error"
-    ({ s with Model.editor = Editor.of_string "'" }
+    (Model.set_editor s (Editor.of_string "'")
      |> fun s ->
-     Model.parse_error_of ~single:true (Editor.to_string s.Model.editor)
+     Model.parse_error_of ~single:true (Editor.to_string (Model.editor s))
      = None);
   let empty_single =
     Model.create ~single:true ~cmd:"jq" ~fixed_args:[] ~initial:"" ()
@@ -219,7 +219,7 @@ let model_tests () =
   in
   check "model.ph-splice"
     (Model.command ph = Ok (Some ("echo", [ "A"; "x"; "y"; "B" ])));
-  let ph_empty = { ph with Model.editor = Editor.of_string "" } in
+  let ph_empty = Model.set_editor ph (Editor.of_string "") in
   check "model.ph-empty-line"
     (Model.command ph_empty = Ok (Some ("echo", [ "A"; "B" ])));
   let inline =
@@ -327,13 +327,13 @@ let model_tests () =
   (match Model.handle_key ~view_h:5 bx Model.Left with
   | Model.Continue (m, []) ->
       check "model.left-stays-in-args" (m.Model.focus = Model.F_args);
-      check_int "model.left-at-edge" 0 (Editor.cursor m.Model.editor)
+      check_int "model.left-at-edge" 0 (Editor.cursor (Model.editor m))
   | _ -> fail "model.left-edge" "unexpected reaction");
 
   (* no fixed command: the line itself is the command *)
   let nc = Model.create ~fixed_args:[] ~initial:"" () in
   check "model.nocmd-empty" (Model.command nc = Ok None);
-  let nc = { nc with Model.editor = Editor.of_string "jq .a" } in
+  let nc = Model.set_editor nc (Editor.of_string "jq .a") in
   check "model.nocmd-split" (Model.command nc = Ok (Some ("jq", [ ".a" ])));
   let ncs = Model.create ~single:true ~fixed_args:[] ~initial:"jq .a | cat" () in
   check "model.nocmd-single-sh"
@@ -342,7 +342,7 @@ let model_tests () =
   (* user_args in split mode: parsed words; unparseable line passed as-is *)
   let m = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"-r '.a'" () in
   check "model.user-args-split" (Model.user_args m = [ "-r"; ".a" ]);
-  let bad = { m with Model.editor = Editor.of_string "'oops" } in
+  let bad = Model.set_editor m (Editor.of_string "'oops") in
   check "model.user-args-bad" (Model.user_args bad = [ "'oops" ]);
 
   (* command_string *)
@@ -371,8 +371,8 @@ let vim_tests () =
   let mk initial =
     Model.create ~vim:true ~cmd:"jq" ~fixed_args:[] ~initial ()
   in
-  let text m = Editor.to_string m.Model.editor in
-  let cur m = Editor.cursor m.Model.editor in
+  let text m = Editor.to_string (Model.editor m) in
+  let cur m = Editor.cursor (Model.editor m) in
 
   (* starts in insert mode; Esc enters normal and steps back one column *)
   let m = mk "hello world" in
@@ -623,7 +623,7 @@ let multiline_tests () =
 
   (* Newline inserts a line break; '\n' splits into shell words *)
   let m2 = keys m [ Model.Newline; Model.Insert (Uchar.of_char '|') ] in
-  check_str "ml.newline" ".a\n|" (Editor.to_string m2.Model.editor);
+  check_str "ml.newline" ".a\n|" (Editor.to_string (Model.editor m2));
   check "ml.newline-words"
     (Model.command m2 = Ok (Some ("jq", [ ".a"; "|" ])));
   (* single-argument mode passes the whole multi-line text as one arg *)
@@ -633,7 +633,7 @@ let multiline_tests () =
   (* in single-line mode Newline does nothing *)
   let sl = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:".a" () in
   check "ml.newline-disabled"
-    (Editor.to_string (key sl Model.Newline).Model.editor = ".a");
+    (Editor.to_string (Model.editor (key sl Model.Newline)) = ".a");
   (* a newline never lands in the fixed-args field *)
   let mfx = keys m [ Model.Toggle_focus; Model.Newline ] in
   check_str "ml.no-newline-in-fixed" "jq" (Model.fixed_text mfx);
@@ -643,7 +643,7 @@ let multiline_tests () =
     Model.create ~multiline:true ~cmd:"jq" ~fixed_args:[]
       ~initial:"abcdef\nxy\nlonger" ()
   in
-  let cur m = Editor.cursor m.Model.editor in
+  let cur m = Editor.cursor (Model.editor m) in
   check_int "ml.cursor-at-end" 16 (cur m3);
   let up1 = key m3 Model.Scroll_up in
   (* col 6 on "longer" -> clamped to end of "xy" (index 7+2=9) *)
@@ -692,10 +692,10 @@ let multiline_tests () =
     (inp out (Model.I_special Model.S_pgdn)).Model.scroll;
   let typed = inp out (Model.I_char (Uchar.of_char 'Z')) in
   check_str "ml.output-typing-ignored" "abcdef\nxy\nlonger"
-    (Editor.to_string typed.Model.editor);
+    (Editor.to_string (Model.editor typed));
   check "ml.output-backspace-ignored"
     (Editor.to_string
-       (inp out (Model.I_special Model.S_backspace)).Model.editor
+       (Model.editor (inp out (Model.I_special Model.S_backspace)))
     = "abcdef\nxy\nlonger");
   check "ml.output-ctrl-d"
     (Model.handle_input ~view_h:5 out (Model.I_ctrl 'd') = Model.Accept_exit);
@@ -748,11 +748,11 @@ let multiline_tests () =
 
   (* vim o/O open a line below/above and enter insert mode *)
   let vo = inp vn (Model.I_char (Uchar.of_char 'o')) in
-  check_str "ml.vim-o" "abc\ndef\n" (Editor.to_string vo.Model.editor);
+  check_str "ml.vim-o" "abc\ndef\n" (Editor.to_string (Model.editor vo));
   check_int "ml.vim-o-cursor" 8 (cur vo);
   check "ml.vim-o-insert" (vo.Model.vmode = Model.V_insert);
   let vO = inp vn (Model.I_char (Uchar.of_char 'O')) in
-  check_str "ml.vim-O" "abc\n\ndef" (Editor.to_string vO.Model.editor);
+  check_str "ml.vim-O" "abc\n\ndef" (Editor.to_string (Model.editor vO));
   check_int "ml.vim-O-cursor" 4 (cur vO);
   check "ml.vim-O-insert" (vO.Model.vmode = Model.V_insert);
   (* outside multiline mode o/O are no-ops *)
@@ -761,20 +761,21 @@ let multiline_tests () =
   in
   let svn = inp sv (Model.I_special Model.S_escape) in
   let svo = inp svn (Model.I_char (Uchar.of_char 'o')) in
-  check_str "ml.vim-o-singleline-noop" "ab" (Editor.to_string svo.Model.editor);
+  check_str "ml.vim-o-singleline-noop" "ab"
+    (Editor.to_string (Model.editor svo));
   check "ml.vim-o-stays-normal" (svo.Model.vmode = Model.V_normal);
 
   (* plain Enter inserts the line break in multiline mode *)
   let en = inp m (Model.I_special Model.S_enter) in
-  check_str "ml.enter-newline" ".a\n" (Editor.to_string en.Model.editor);
+  check_str "ml.enter-newline" ".a\n" (Editor.to_string (Model.editor en));
   (* C-o / Alt-Enter submit (run) without inserting a break *)
   (match Model.handle_input ~view_h:5 m (Model.I_ctrl 'o') with
   | Model.Continue (m', [ Model.Start_run ]) ->
-      check_str "ml.ctrl-o-runs" ".a" (Editor.to_string m'.Model.editor)
+      check_str "ml.ctrl-o-runs" ".a" (Editor.to_string (Model.editor m'))
   | _ -> fail "ml.ctrl-o" "C-o should run, not edit");
   (match Model.handle_input ~view_h:5 m (Model.I_special Model.S_meta_enter) with
   | Model.Continue (m', [ Model.Start_run ]) ->
-      check_str "ml.meta-enter-runs" ".a" (Editor.to_string m'.Model.editor)
+      check_str "ml.meta-enter-runs" ".a" (Editor.to_string (Model.editor m'))
   | _ -> fail "ml.meta-enter" "Alt-Enter should run, not edit");
   (* priority: multiline newline beats enter-accept; Alt-Enter accepts *)
   let mea =
@@ -782,7 +783,8 @@ let multiline_tests () =
       ~initial:"x" ()
   in
   let mea_e = inp mea (Model.I_special Model.S_enter) in
-  check_str "ml.enter-beats-accept" "x\n" (Editor.to_string mea_e.Model.editor);
+  check_str "ml.enter-beats-accept" "x\n"
+    (Editor.to_string (Model.editor mea_e));
   check "ml.alt-enter-accepts"
     (Model.handle_input ~view_h:5 mea (Model.I_special Model.S_meta_enter)
     = Model.Accept_exit);
@@ -816,7 +818,7 @@ let multiline_tests () =
     rows;
   check "ml.render-cursor-row1" (frame.Render.cursor = Some (5, 1));
   (* cursor on the first line renders at row 0 *)
-  let r2h = { r2 with Model.editor = Editor.with_cursor r2.Model.editor 1 } in
+  let r2h = Model.set_editor r2 (Editor.with_cursor (Model.editor r2) 1) in
   check "ml.render-cursor-row0"
     ((Render.render ~w:20 ~h:7 r2h).Render.cursor = Some (5, 0));
 
@@ -832,7 +834,7 @@ let multiline_tests () =
   check_str "ml.render-clamp-r0" "  l2" (Render.usub (List.nth rows 0) 0 4);
   check_str "ml.render-clamp-r2" "  l4" (Render.usub (List.nth rows 2) 0 4);
   check "ml.render-clamp-cursor" (frame.Render.cursor = Some (4, 2));
-  let top = { tall with Model.editor = Editor.with_cursor tall.Model.editor 0 } in
+  let top = Model.set_editor tall (Editor.with_cursor (Model.editor tall) 0) in
   let frame = Render.render ~w:20 ~h:9 top in
   check_str "ml.render-top-r0" "jq> l0"
     (String.trim (List.nth (Render.to_strings frame) 0));
@@ -846,6 +848,105 @@ let multiline_tests () =
   check_int "ml.render-out-rows" 8 (List.length rows);
   check_str "ml.render-out-first" "line7"
     (String.trim (List.nth rows 2))
+
+(* --- Pipe mode (-p) --- *)
+
+let pipe_tests () =
+  let inp m i =
+    match Model.handle_input ~view_h:5 m i with
+    | Model.Continue (m', _) -> m'
+    | _ -> m
+  in
+  let contains hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+    nl = 0 || go 0
+  in
+  let mk steps = Model.create ~steps ~fixed_args:[] ~initial:"" () in
+  let m = mk [ ("grep o", ""); ("tr a-z A-Z", "") ] in
+  check_int "pipe.nsteps" 2 (Model.nsteps m);
+  check "pipe.command"
+    (Model.command m = Ok (Some ("sh", [ "-c"; "grep o | tr a-z A-Z" ])));
+  check_str "pipe.command_string" "grep o | tr a-z A-Z"
+    (Model.command_string m);
+
+  (* typing edits the current step only *)
+  let m1 = inp m (Model.I_char (Uchar.of_char '-')) in
+  let m1 = inp m1 (Model.I_char (Uchar.of_char 'v')) in
+  check "pipe.edit-first-step"
+    (Model.command m1 = Ok (Some ("sh", [ "-c"; "grep o -v | tr a-z A-Z" ])));
+
+  (* C-n switches to the next step, C-p back; both clamp at the ends *)
+  let n1 = inp m (Model.I_ctrl 'n') in
+  check_int "pipe.ctrl-n" 1 n1.Model.cur;
+  check_int "pipe.ctrl-n-clamp" 1 (inp n1 (Model.I_ctrl 'n')).Model.cur;
+  let p1 = inp n1 (Model.I_ctrl 'p') in
+  check_int "pipe.ctrl-p" 0 p1.Model.cur;
+  check_int "pipe.ctrl-p-clamp" 0 (inp p1 (Model.I_ctrl 'p')).Model.cur;
+  let n1x = inp n1 (Model.I_char (Uchar.of_char 'x')) in
+  check "pipe.edit-second-step"
+    (Model.command n1x = Ok (Some ("sh", [ "-c"; "grep o | tr a-z A-Z x" ])));
+
+  (* with a single step C-p/C-n keep scrolling *)
+  let s1 =
+    with_lines 30 (Model.create ~cmd:"cat" ~fixed_args:[] ~initial:"" ())
+  in
+  check_int "pipe.single-step-ctrl-n-scrolls" 1
+    (inp s1 (Model.I_ctrl 'n')).Model.scroll;
+
+  (* an empty step drops out of the pipeline; all empty = nothing to run *)
+  check "pipe.empty-step-drops"
+    (Model.command (mk [ ("grep o", ""); ("", "") ])
+    = Ok (Some ("sh", [ "-c"; "grep o" ])));
+  check "pipe.all-empty" (Model.command (mk [ ("", ""); ("", "") ]) = Ok None);
+
+  (* a parse error in any step is reported and blocks the run *)
+  let b = mk [ ("grep o", ""); ("tr", "'x") ] in
+  check "pipe.parse-error"
+    (b.Model.parse_error = Some Shellwords.Unterminated_single_quote);
+  check "pipe.command-error" (Result.is_error (Model.command b));
+
+  (* per-step args at exit *)
+  check "pipe.all-args"
+    (Model.all_args (mk [ ("grep", "o"); ("tr", "a b") ])
+    = [ [ "o" ]; [ "a"; "b" ] ]);
+
+  (* vim: J/K switch steps in normal mode *)
+  let v =
+    Model.create ~vim:true ~steps:[ ("grep o", ""); ("sort", "") ]
+      ~fixed_args:[] ~initial:"" ()
+  in
+  let vn = inp v (Model.I_special Model.S_escape) in
+  let vj = inp vn (Model.I_char (Uchar.of_char 'J')) in
+  check_int "pipe.vim-J" 1 vj.Model.cur;
+  check_int "pipe.vim-K" 0 (inp vj (Model.I_char (Uchar.of_char 'K'))).Model.cur;
+
+  (* render: one prompt row per step, cursor on the focused step, step
+     indicator in the status bar *)
+  let r =
+    {
+      (mk [ ("grep o", "x"); ("sort", "") ]) with
+      Model.lines = [| { Model.kind = Out; text = "hit" } |];
+      status = Some (Model.Exited 0);
+    }
+  in
+  let frame = Render.render ~w:22 ~h:6 r in
+  let rows = Render.to_strings frame in
+  check_str "pipe.render-step0" "grep o> x" (String.trim (List.nth rows 0));
+  check_str "pipe.render-step1" "sort>" (String.trim (List.nth rows 1));
+  check_str "pipe.render-output" "hit" (String.trim (List.nth rows 2));
+  check "pipe.render-cursor" (frame.Render.cursor = Some (9, 0));
+  check "pipe.step-indicator" (contains (List.nth rows 5) "[1/2]");
+  let r2 = inp r (Model.I_ctrl 'n') in
+  let frame2 = Render.render ~w:22 ~h:6 r2 in
+  check "pipe.render-cursor-step1" (frame2.Render.cursor = Some (6, 1));
+  check "pipe.step-indicator-2"
+    (contains (List.nth (Render.to_strings frame2) 5) "[2/2]");
+  (* a screen too small for every step scrolls the input to the cursor *)
+  let small = Render.render ~w:22 ~h:5 r2 in
+  check_str "pipe.render-scrolled" "sort>"
+    (String.trim (List.nth (Render.to_strings small) 0));
+  check "pipe.render-scrolled-cursor" (small.Render.cursor = Some (6, 0))
 
 (* --- Lens/hint panes (--lens / --hint) --- *)
 
@@ -1068,13 +1169,25 @@ let render_invariants () =
        match Model.handle_key ~view_h:5 m Model.Toggle_focus with
        | Model.Continue (m, _) -> m
        | _ -> m);
-      {
-        (Model.create ~multiline:true ~cmd:"jq" ~fixed_args:[]
-           ~initial:"x\ny\nz" ())
-        with
-        Model.editor =
-          Editor.with_cursor (Editor.of_string "x\ny\nz") 0;
-      };
+      (let m =
+         Model.create ~multiline:true ~cmd:"jq" ~fixed_args:[]
+           ~initial:"x\ny\nz" ()
+       in
+       Model.set_editor m (Editor.with_cursor (Editor.of_string "x\ny\nz") 0));
+      (let m =
+         Model.create
+           ~steps:[ ("grep o", "x"); ("", "raw 'line"); ("tr a-z A-Z", "") ]
+           ~fixed_args:[] ~initial:"" ()
+       in
+       { (with_lines 10 m) with Model.scroll = 3 });
+      (let m =
+         Model.create ~multiline:true
+           ~steps:[ ("jq", ".a\n.b"); ("wc", "-l") ]
+           ~fixed_args:[] ~initial:"" ()
+       in
+       match Model.handle_key ~view_h:5 m Model.Step_next with
+       | Model.Continue (m, _) -> m
+       | _ -> m);
       (let m =
          Model.create ~cmd:"jq" ~fixed_args:[] ~initial:".a"
            ~lenses:[ "head -1" ] ()
@@ -1180,6 +1293,7 @@ let () =
   vim_tests ();
   render_tests ();
   multiline_tests ();
+  pipe_tests ();
   pane_tests ();
   ansi_tests ();
   ansi_toggle_tests ();

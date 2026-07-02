@@ -1,7 +1,7 @@
 (** Pure screen renderer: model + terminal size -> a frame of styled rows.
 
-    Layout invariant: the input area is on top (one row, or up to a third of
-    the screen in multiline mode), the last row is the status bar,
+    Layout invariant: the input area is on top (one row per pipeline step,
+    up to a third of the screen), the last row is the status bar,
     everything between is the scrollable output viewport. Every frame has
     exactly [h] rows and every row exactly [w] columns (counting Unicode
     characters as one column each), so the layout can never shift. *)
@@ -305,20 +305,25 @@ let window_parts ~w ~hscroll parts =
     [] visible
   |> List.rev_map (fun (st, b) -> (st, Buffer.contents b))
 
-(* The args editor as display lines: one per '\n' in multiline mode, the
+(* An args editor as display lines: one per '\n' in multiline mode, the
    whole (control-sanitized) text as a single line otherwise. *)
-let args_lines (m : Model.t) =
+let args_lines_of (m : Model.t) ed =
   if m.multiline then
-    String.split_on_char '\n' (Editor.to_string m.editor)
-    |> List.map sanitize_flat
-  else [ sanitize_flat (Editor.to_string m.editor) ]
+    String.split_on_char '\n' (Editor.to_string ed) |> List.map sanitize_flat
+  else [ sanitize_flat (Editor.to_string ed) ]
 
-(** Rows taken by the input area: the number of args lines, clamped to a
-    third of the screen (and always at least one), so at least one output
-    row and the status bar survive. *)
+(** Rows taken by the input area: one block per pipeline step, each the
+    number of its args lines; the total is clamped to a third of the screen
+    (and always at least one), so at least one output row and the status bar
+    survive. *)
 let input_height ~h (m : Model.t) =
-  if not m.multiline then 1
-  else min (List.length (args_lines m)) (max 1 (h / 3))
+  let total =
+    Array.fold_left
+      (fun acc (st : Model.step) ->
+        acc + List.length (args_lines_of m st.Model.args))
+      0 m.Model.steps
+  in
+  if total <= 1 then 1 else min total (max 1 (h / 3))
 
 (* (line, column) of character position [cur] within [lines] (lines are
    separated by one '\n' character each). *)
@@ -332,65 +337,80 @@ let cursor_line_col lines cur =
   in
   go 0 cur lines
 
-(* The input area is composed of styled regions:
+(* The input area is composed of styled regions, one block per pipeline
+   step:
      CMD [SP fixed-args] "> " args-line-0
      "  " args-line-1
      ...
-   The fixed-args region is editable too (Tab moves the cursor there) and
-   lives on row 0 only. The row holding the cursor scrolls horizontally to
-   keep it visible; in multiline mode the area is clamped to [input_height]
-   rows and scrolls vertically to keep the cursor row visible. *)
+   Each step's fixed-args region is editable too (Tab moves the cursor
+   there) and lives on the step's first row. The row holding the cursor
+   scrolls horizontally to keep it visible; the whole area is clamped to
+   [input_height] rows and scrolls vertically to keep the cursor row
+   visible. *)
 let input_area ~w ~h (m : Model.t) =
-  let fixed_text = sanitize_flat (Model.fixed_text m) in
-  let prompt_parts, args_off, fixed_cursor =
-    (* the whole fixed command line is editable; show its slot when it has
-       content or holds the cursor *)
-    let fixed_shown = fixed_text <> "" || m.focus = Model.F_fixed in
-    if not fixed_shown then ([ (Prompt, "> ") ], 2, 0)
-    else
-      let display = if fixed_text = "" then " " else fixed_text in
-      let parts =
-        (* cosmetic: the command word keeps the prompt color *)
-        match String.index_opt display ' ' with
-        | Some i when fixed_text <> "" ->
-            [
-              (Prompt, String.sub display 0 i);
-              (Input, String.sub display i (String.length display - i));
-            ]
-        | Some _ -> [ (Input, display) ]
-        | None -> [ (Prompt, display) ]
+  let cursor = ref (0, 0) in
+  (* absolute (row, column) before scrolling *)
+  let rows_rev = ref [] in
+  let nrows = ref 0 in
+  Array.iteri
+    (fun i (st : Model.step) ->
+      let fixed_text = sanitize_flat (Editor.to_string st.Model.fixed) in
+      (* the whole fixed command line is editable; show its slot when it has
+         content or holds the cursor *)
+      let fixed_shown =
+        fixed_text <> "" || (i = m.Model.cur && m.focus = Model.F_fixed)
       in
-      ( parts @ [ (Prompt, "> ") ],
-        ulength display + 2,
-        Editor.cursor m.fixed_editor )
-  in
-  let lines = args_lines m in
-  let nlines = List.length lines in
+      let prompt_parts, args_off, fixed_cursor =
+        if not fixed_shown then ([ (Prompt, "> ") ], 2, 0)
+        else
+          let display = if fixed_text = "" then " " else fixed_text in
+          let parts =
+            (* cosmetic: the command word keeps the prompt color *)
+            match String.index_opt display ' ' with
+            | Some sp when fixed_text <> "" ->
+                [
+                  (Prompt, String.sub display 0 sp);
+                  (Input, String.sub display sp (String.length display - sp));
+                ]
+            | Some _ -> [ (Input, display) ]
+            | None -> [ (Prompt, display) ]
+          in
+          ( parts @ [ (Prompt, "> ") ],
+            ulength display + 2,
+            Editor.cursor st.Model.fixed )
+      in
+      let lines = args_lines_of m st.Model.args in
+      if i = m.Model.cur then begin
+        match m.focus with
+        | Model.F_fixed -> cursor := (!nrows, fixed_cursor)
+        | Model.F_args | Model.F_output ->
+            let cy, ccol =
+              cursor_line_col lines (Editor.cursor st.Model.args)
+            in
+            cursor := (!nrows + cy, (if cy = 0 then args_off else 2) + ccol)
+      end;
+      List.iteri
+        (fun li line ->
+          let parts =
+            if li = 0 then prompt_parts @ [ (Input, line) ]
+            else [ (Prompt, "  "); (Input, line) ]
+          in
+          rows_rev := parts :: !rows_rev;
+          incr nrows)
+        lines)
+    m.Model.steps;
+  let all_rows = Array.of_list (List.rev !rows_rev) in
+  let total = Array.length all_rows in
   let input_h = input_height ~h m in
-  let cy, ccol = cursor_line_col lines (Editor.cursor m.editor) in
-  let vscroll =
-    if m.focus = Model.F_fixed then 0
-    else max 0 (min (nlines - input_h) (cy - input_h + 1))
-  in
-  (* absolute (row, column) of the cursor before any scrolling *)
-  let cursor_row, cursor_abs =
-    match m.focus with
-    | Model.F_fixed -> (0, fixed_cursor)
-    | Model.F_args | Model.F_output ->
-        (cy, (if cy = 0 then args_off else 2) + ccol)
-  in
+  let cursor_row, cursor_abs = !cursor in
+  let vscroll = max 0 (min (total - input_h) (cursor_row - input_h + 1)) in
   let rows =
     List.init input_h (fun i ->
-        let li = vscroll + i in
-        let line = List.nth lines li in
-        let parts =
-          if li = 0 then prompt_parts @ [ (Input, line) ]
-          else [ (Prompt, "  "); (Input, line) ]
-        in
+        let ri = vscroll + i in
         let hscroll =
-          if li = cursor_row && cursor_abs >= w then cursor_abs - w + 1 else 0
+          if ri = cursor_row && cursor_abs >= w then cursor_abs - w + 1 else 0
         in
-        window_parts ~w ~hscroll parts)
+        window_parts ~w ~hscroll all_rows.(ri))
   in
   let hscroll = if cursor_abs < w then 0 else cursor_abs - w + 1 in
   let cx = min (cursor_abs - hscroll) (max 0 (w - 1)) in
@@ -427,6 +447,10 @@ let status_row ~w ~view_h (m : Model.t) =
   in
   let mode = if m.single then " [1 arg] " else "" in
   let ansi_ind = if m.ansi then " [ansi] " else "" in
+  let step_ind =
+    let n = Model.nsteps m in
+    if n > 1 then Printf.sprintf " [%d/%d] " (m.Model.cur + 1) n else ""
+  in
   let focus_ind =
     match m.focus with
     | Model.F_fixed -> " [fixed] "
@@ -436,7 +460,7 @@ let status_row ~w ~view_h (m : Model.t) =
   let hints = "enter run · ^D accept · esc quit " in
   let leftw =
     ulength vim_mode + ulength state + ulength parse + ulength mode
-    + ulength ansi_ind + ulength focus_ind
+    + ulength ansi_ind + ulength step_ind + ulength focus_ind
   in
   (* Right-hand side: drop the hints, then the range, as space runs out. *)
   let right =
@@ -454,6 +478,7 @@ let status_row ~w ~view_h (m : Model.t) =
         (Bar_alert, parse);
         (Bar, mode);
         (Bar, ansi_ind);
+        (Bar, step_ind);
         (Bar, focus_ind);
         (Bar, String.make mid ' ' ^ right);
       ]

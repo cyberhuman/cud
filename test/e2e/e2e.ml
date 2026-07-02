@@ -866,6 +866,63 @@ let test_ctrl_o_submit () =
     Printf.printf "FAIL ctrl-o-output: printed %S\n" printed
   end
 
+let test_pipe () =
+  let sess =
+    spawn "pipe"
+      (Printf.sprintf
+         "printf 'foo\\nbar\\nboo\\n' | %s --debounce 0.05 -p -c -i o -i 'a-z \
+          A-Z' -- grep tr"
+         (quote cud))
+  in
+  (* one prompt row per step, then the pipeline's output *)
+  expect_row sess 0 "grep> o";
+  expect_row sess 1 "tr> a-z A-Z";
+  expect_row sess 2 "FOO";
+  expect_row sess 3 "BOO";
+  expect_status sess "exit 0";
+  expect_status sess "[1/2]";
+  expect_cursor sess (7, 0);
+  (* C-n focuses the next step *)
+  send sess (ctrl 'n');
+  expect_status sess "[2/2]";
+  expect_cursor sess (11, 1);
+  (* edits go to that step; the whole pipeline re-runs *)
+  send sess (ctrl 'u');
+  send sess "o 0";
+  expect_row sess 2 "f00";
+  expect_row sess 3 "b00";
+  (* C-p returns to the first step *)
+  send sess (ctrl 'p');
+  expect_status sess "[1/2]";
+  expect_cursor sess (7, 0);
+  (* -c prints the whole pipeline on accept *)
+  send sess (ctrl 'd');
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "grep o | tr o 0") then begin
+    incr failures;
+    Printf.printf "FAIL pipe: printed %S\n" printed
+  end
+
+let test_pipe_args_output () =
+  (* the default quoted output keeps the step structure: one line per step *)
+  let sess =
+    spawn "pipe-args"
+      (Printf.sprintf
+         "printf 'x\\n' | %s --debounce 0.05 -p -i 'a b' -i 'a A' -- echo tr"
+         (quote cud))
+  in
+  expect_row sess 0 "echo> a b";
+  expect_row sess 1 "tr> a A";
+  expect_row sess 2 "A b";
+  send sess (ctrl 'd');
+  expect_exit sess 0;
+  let printed = printed_after_release sess in
+  if not (contains printed "a b\r\na A") then begin
+    incr failures;
+    Printf.printf "FAIL pipe-args: printed %S\n" printed
+  end
+
 let test_lens () =
   let sess =
     spawn "lens"
@@ -933,6 +990,8 @@ let () =
       ("multiline", test_multiline);
       ("ml-enter-accept", test_multiline_enter_accept);
       ("ctrl-o-submit", test_ctrl_o_submit);
+      ("pipe", test_pipe);
+      ("pipe-args", test_pipe_args_output);
       ("lens", test_lens);
       ("hint", test_hint);
     ]

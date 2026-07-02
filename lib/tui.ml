@@ -9,7 +9,10 @@ type opts = {
   fixed_args : string list;
   placeholder : string option;
       (** xargs -I style substitution point in [fixed_args] *)
-  initial : string;
+  initials : string list;
+      (** initial argument lines; with [--pipe] one per step, in order *)
+  pipe : bool;
+      (** each positional argument is one step of a shell pipeline *)
   auto : bool;  (** re-run automatically after edits *)
   debounce : float;  (** seconds to wait after the last edit *)
   single : bool;  (** start in single-argument mode *)
@@ -24,8 +27,10 @@ type opts = {
 type result = {
   accepted : bool;  (** Ctrl-D (true) vs Escape/Ctrl-C (false) *)
   status : Model.status option;  (** of the last finished run *)
-  args : string list;  (** the arguments in the editor when the UI closed *)
-  command : string;  (** the whole command, shell-quoted *)
+  args : string list list;
+      (** the arguments in the editors when the UI closed, one list per
+          pipeline step (a single one without [--pipe]) *)
+  command : string;  (** the whole command (pipeline), shell-quoted *)
   output : string list;  (** the last finished run's output lines *)
 }
 
@@ -180,14 +185,17 @@ let run (opts : opts) : result Lwt.t =
     | _ -> Some (String.concat "\n" texts ^ "\n")
   in
   let hint_env (model : Model.t) =
-    let ed = model.editor in
+    let ed = Model.editor model in
     let extras =
       [|
         "CUD_BEFORE=" ^ Editor.to_string (Editor.kill_to_end ed);
         "CUD_AFTER=" ^ Editor.to_string (Editor.kill_to_start ed);
         "CUD_FIXED=" ^ Model.fixed_text model;
         ("CUD_CMD="
-        ^ match Model.command model with Ok (Some (p, _)) -> p | _ -> "");
+        ^
+        match Model.current_command model with
+        | Ok (Some (p, _)) -> p
+        | _ -> "");
       |]
     in
     Array.append (Unix.environment ()) extras
@@ -229,7 +237,7 @@ let run (opts : opts) : result Lwt.t =
   let has_hints = opts.hints <> [] in
   let edit_sig (model : Model.t) =
     let ed = Model.focused model in
-    (model.focus, Editor.to_string ed, Editor.cursor ed)
+    (model.focus, model.cur, Editor.to_string ed, Editor.cursor ed)
   in
 
   let schedule_debounce (model : Model.t) =
@@ -281,7 +289,7 @@ let run (opts : opts) : result Lwt.t =
       {
         accepted;
         status = model.Model.status;
-        args = Model.user_args model;
+        args = Model.all_args model;
         command = Model.command_string model;
         output =
           Array.to_list model.lines
@@ -337,10 +345,26 @@ let run (opts : opts) : result Lwt.t =
   in
 
   let model =
-    Model.create ?cmd:opts.cmd ?placeholder:opts.placeholder
+    (* --pipe: every positional argument is one step's fixed command line,
+       verbatim; -i values pair up with the steps in order (either list may
+       be the longer one) *)
+    let steps =
+      if not opts.pipe then []
+      else
+        let fixed =
+          match opts.cmd with Some c -> c :: opts.fixed_args | None -> []
+        in
+        let n = max 1 (max (List.length fixed) (List.length opts.initials)) in
+        List.init n (fun i ->
+            ( Option.value (List.nth_opt fixed i) ~default:"",
+              Option.value (List.nth_opt opts.initials i) ~default:"" ))
+    in
+    Model.create ?cmd:opts.cmd ?placeholder:opts.placeholder ~steps
       ~single:opts.single ~vim:opts.vim ~enter_accept:opts.enter_accept
       ~ansi:opts.ansi ~multiline:opts.multiline ~lenses:opts.lenses
-      ~hints:opts.hints ~fixed_args:opts.fixed_args ~initial:opts.initial ()
+      ~hints:opts.hints ~fixed_args:opts.fixed_args
+      ~initial:(Option.value (List.nth_opt opts.initials 0) ~default:"")
+      ()
   in
   (* Run once at startup so the output area is populated immediately. *)
   let model, proc = start_run model None in

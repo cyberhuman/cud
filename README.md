@@ -55,6 +55,9 @@ immediately, so it reads instant EOF instead of fighting you for the tty.
 Flags:
 
 - `-i TEXT`, `--initial=TEXT` — initial contents of the argument line
+  (with `-p`, repeat to give each step its initial arguments, in order)
+- `-p`, `--pipe` — every `CMD` argument is one step of a shell pipeline
+  (see below)
 - `-m`, `--manual` — re-run only on Enter instead of after every edit
 - `--debounce=SECONDS` — delay before the automatic re-run (default 0.3)
 - `-1`, `--single` — start in single-argument mode
@@ -95,10 +98,43 @@ Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
 | Enter | re-run now (`-M`: insert a line break; `-e`: accept) |
 | C-t | toggle single-argument mode |
 | M-a | toggle ANSI color rendering (`--ansi`) |
-| Up/Down, PgUp/PgDn, C-p/C-n | scroll output |
+| C-p/C-n | previous/next pipe step (`-p`); otherwise scroll output |
+| Up/Down, PgUp/PgDn | scroll output |
 | Ctrl/Shift+Up/Down | scroll output (even from the input in `-M`) |
 | C-d | accept: exit 0 and print the arguments |
 | Esc, C-c | cancel: exit 130 |
+
+### Pipe mode (`-p`)
+
+With `-p` the positional arguments become the steps of a shell pipeline,
+each with its own prompt and editable argument line, stacked at the top:
+
+```
+ps aux | cud -p -- 'grep ssh' 'wc -l'
+```
+
+```
+┌──────────────────────────────────────────────┐
+│ grep ssh> -v                                 │  ← step 1
+│ wc> -l                                       │  ← step 2
+│ 42                                           │  ← the pipeline's output
+│ exit 0  [1/2]   1-1/1  enter run · ^D accept │
+└──────────────────────────────────────────────┘
+```
+
+Quote a step that has fixed arguments (it is one `CMD` argument, split
+shell-style once inside); a step given as an empty string — or emptied at
+runtime — simply drops out of the pipeline. Ctrl-P/Ctrl-N move the cursor
+between the steps (`J`/`K` in vim normal mode); the status bar shows which
+step is current (`[1/2]`). Tab, single-argument mode, `-I` and everything
+else work per step. Repeat `-i` to seed several steps:
+
+```
+printf '%s\n' foo bar boo | cud -p -i o -i 'a-z A-Z' -- grep tr
+```
+
+On accept, the default output prints one line of quoted arguments per step;
+`-c` prints the whole pipeline, ready to paste.
 
 ### Multiline mode (`-M`)
 
@@ -167,7 +203,7 @@ mode, shown in the status bar:
 - `i` `a` `I` `A` enter insert mode (`-M`: also `o`/`O` to open a line
   below/above); `p`/`P` paste the register;
   `u`/`C-r` undo/redo
-- output scrolling: `j` `k` `G` `gg`
+- output scrolling: `j` `k` `G` `gg`; `J`/`K` switch pipe steps (`-p`)
 - Enter re-runs; `ZZ` or C-d accepts; `ZQ` or C-c cancels (Escape never
   quits in vim mode)
 

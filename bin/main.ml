@@ -1,21 +1,32 @@
+(* [args]: one list per pipeline step (a single one without --pipe). The
+   quoted default keeps the step structure, one line per step; the plain
+   formats flatten it. *)
 let print_args mode args command out_lines =
   match mode with
   | `Quiet -> ()
   | `Quoted ->
-      print_endline
-        (String.concat " " (List.map Cud_lib.Shellwords.quote_word args))
-  | `Lines -> List.iter print_endline args
+      List.iter
+        (fun step ->
+          print_endline
+            (String.concat " " (List.map Cud_lib.Shellwords.quote_word step)))
+        args
+  | `Lines -> List.iter print_endline (List.concat args)
   | `Null ->
       List.iter
         (fun arg ->
           print_string arg;
           print_char '\000')
-        args
+        (List.concat args)
   | `Command -> print_endline command
   | `Output -> List.iter print_endline out_lines
 
-let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~multiline
-    ~lenses ~hints ~placeholder ~output cmdline =
+let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi
+    ~multiline ~lenses ~hints ~placeholder ~pipe ~output cmdline =
+  if (not pipe) && List.length initials > 1 then begin
+    prerr_endline "cud: --initial repeated: only meaningful with --pipe";
+    124
+  end
+  else begin
   let cmd, fixed_args =
     match cmdline with [] -> (None, []) | cmd :: rest -> (Some cmd, rest)
   in
@@ -26,7 +37,8 @@ let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~multiline
       Cud_lib.Tui.cmd;
       fixed_args;
       placeholder;
-      initial;
+      initials;
+      pipe;
       auto = not manual;
       debounce;
       single;
@@ -51,14 +63,28 @@ let run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~multiline
   | exception Unix.Unix_error (err, fn, _) ->
       Printf.eprintf "cud: %s: %s\n" fn (Unix.error_message err);
       1
+  end
 
 open Cmdliner
 
-let initial =
+let initials =
   Arg.(
-    value & opt string ""
+    value & opt_all string []
     & info [ "i"; "initial" ] ~docv:"TEXT"
-        ~doc:"Initial contents of the argument line.")
+        ~doc:
+          "Initial contents of the argument line. With $(b,--pipe), repeat \
+           to give each step its initial arguments, in order.")
+
+let pipe =
+  Arg.(
+    value & flag
+    & info [ "p"; "pipe" ]
+        ~doc:
+          "Build a shell pipeline: every positional argument is one step's \
+           command line (quote steps that have fixed arguments), each with \
+           its own prompt and editable arguments, stacked at the top. Switch \
+           between steps with Ctrl-P/Ctrl-N (vim normal mode: J/K). A step \
+           left empty drops out of the pipeline.")
 
 let manual =
   Arg.(
@@ -181,7 +207,8 @@ let cmdline =
           "Command to run, with optional fixed arguments. Put $(b,--) before \
            it if it starts with a dash. With no command at all, the input \
            line itself is the command line (run with $(b,sh -c) in \
-           single-argument mode).")
+           single-argument mode). With $(b,--pipe), each $(docv) is one \
+           pipeline step.")
 
 let cmd =
   let doc = "interactively edit a command's arguments and re-run it" in
@@ -195,6 +222,10 @@ let cmd =
          Every run is fed the captured input again.";
       `P "Example: $(b,swaymsg -t get_outputs | cud jq)";
       `P
+        "With $(b,--pipe) the positional arguments form a shell pipeline, \
+         one editable step per line: $(b,ps aux | cud -p -- 'grep ssh' 'wc \
+         -l').";
+      `P
         "On exit the arguments from the editor are printed to stdout \
          (shell-quoted by default; see $(b,--quiet), $(b,--lines), \
          $(b,--null)).";
@@ -207,7 +238,7 @@ let cmd =
   in
   let term =
     let open Term.Syntax in
-    let+ initial
+    let+ initials
     and+ manual
     and+ debounce
     and+ single
@@ -218,10 +249,11 @@ let cmd =
     and+ lenses
     and+ hints
     and+ placeholder
+    and+ pipe
     and+ output
     and+ cmdline in
-    run ~initial ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~multiline
-      ~lenses ~hints ~placeholder ~output cmdline
+    run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi
+      ~multiline ~lenses ~hints ~placeholder ~pipe ~output cmdline
   in
   Cmd.v (Cmd.info "cud" ~doc ~man) term
 
