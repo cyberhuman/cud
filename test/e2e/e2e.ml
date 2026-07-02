@@ -911,17 +911,26 @@ let test_pipe () =
   expect_status sess "exit 0";
   expect_status sess "[1/2]";
   expect_cursor sess (7, 0);
-  (* C-n focuses the next step *)
+  (* C-n focuses the next step, keeping the on-screen cursor column *)
   send sess (ctrl 'n');
   expect_status sess "[2/2]";
-  expect_cursor sess (11, 1);
+  expect_cursor sess (7, 1);
   (* edits go to that step; the whole pipeline re-runs *)
+  send sess (ctrl 'e');
   send sess (ctrl 'u');
   send sess "o 0";
   expect_row sess 2 "f00";
   expect_row sess 3 "b00";
   (* C-p returns to the first step *)
   send sess (ctrl 'p');
+  expect_status sess "[1/2]";
+  expect_cursor sess (7, 0);
+  (* Down/Up also move across the steps, staying in the same screen
+     column: 7 on "grep> o" is also 7 on "tr> o 0" *)
+  send sess down;
+  expect_status sess "[2/2]";
+  expect_cursor sess (7, 1);
+  send sess up;
   expect_status sess "[1/2]";
   expect_cursor sess (7, 0);
   (* -c prints the whole pipeline on accept *)

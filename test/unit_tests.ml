@@ -943,6 +943,63 @@ let pipe_tests () =
     (Model.all_args (mk [ ("grep", "o"); ("tr", "a b") ])
     = [ [ "o" ]; [ "a"; "b" ] ]);
 
+  let key m k =
+    match Model.handle_key ~view_h:5 m k with
+    | Model.Continue (m', _) -> m'
+    | _ -> m
+  in
+  (* switching steps preserves the on-screen cursor column: "grep> " and
+     "tr> " have different widths, so the text column shifts by the
+     difference (and clamps into the line) *)
+  let sc = mk [ ("grep", "abcdef"); ("tr", "xy") ] in
+  let sc = Model.set_editor sc (Editor.with_cursor (Model.editor sc) 4) in
+  (* screen 10 = "grep> " (6) + 4; on "tr> " that is text column 6 -> clamp *)
+  let sn = inp sc (Model.I_ctrl 'n') in
+  check_int "pipe.switch-preserves-col" 2 (Editor.cursor (Model.editor sn));
+  (* back: screen 6 = "tr> " (4) + 2 -> "grep> " column 0 *)
+  let sp = inp sn (Model.I_ctrl 'p') in
+  check_int "pipe.switch-back-col" 0 (Editor.cursor (Model.editor sp));
+
+  (* Up/Down cross the steps too, same screen column, clamping at the ends *)
+  let cd = key sc Model.Cursor_down in
+  check_int "pipe.down-crosses" 1 cd.Model.cur;
+  check_int "pipe.down-col" 2 (Editor.cursor (Model.editor cd));
+  check_int "pipe.down-clamps" 1 (key cd Model.Cursor_down).Model.cur;
+  let cu = key cd Model.Cursor_up in
+  check_int "pipe.up-crosses" 0 cu.Model.cur;
+  check_int "pipe.up-col" 0 (Editor.cursor (Model.editor cu));
+  check_int "pipe.up-clamps" 0 (key cu Model.Cursor_up).Model.cur;
+  (* the arrows are bound to that motion *)
+  check_int "pipe.arrow-down-crosses" 1
+    (inp sc (Model.I_special Model.S_down)).Model.cur;
+  (* ... but keep scrolling in plain single-line, single-step mode *)
+  check_int "pipe.arrow-scrolls-single-step" 1
+    (inp
+       (with_lines 30 (Model.create ~cmd:"cat" ~fixed_args:[] ~initial:"" ()))
+       (Model.I_special Model.S_down))
+      .Model.scroll;
+
+  (* multiline steps: Up/Down walk the step's own lines first and only
+     cross at its first/last line *)
+  let mml =
+    Model.create ~multiline:true
+      ~steps:[ ("jq", ".a\n.bb"); ("wc", "-l") ]
+      ~fixed_args:[] ~initial:"" ()
+  in
+  let w1 = key mml Model.Cursor_up in
+  check_int "pipe.ml-up-within" 0 w1.Model.cur;
+  check_int "pipe.ml-up-within-cursor" 2 (Editor.cursor (Model.editor w1));
+  check_int "pipe.ml-up-top-clamp" 2
+    (Editor.cursor (Model.editor (key w1 Model.Cursor_up)));
+  (* screen 5 = indent (2) + col 3 on ".bb"; on "wc> " that is column 1 *)
+  let d1 = key mml Model.Cursor_down in
+  check_int "pipe.ml-down-step" 1 d1.Model.cur;
+  check_int "pipe.ml-down-col" 1 (Editor.cursor (Model.editor d1));
+  (* back up: screen 5 = "wc> " (4) + 1 -> ".bb" (indent 2) column 3 *)
+  let u1 = key d1 Model.Cursor_up in
+  check_int "pipe.ml-up-step" 0 u1.Model.cur;
+  check_int "pipe.ml-up-lastline-col" 6 (Editor.cursor (Model.editor u1));
+
   (* vim: J/K switch steps in normal mode *)
   let v =
     Model.create ~vim:true ~steps:[ ("grep o", ""); ("sort", "") ]
@@ -952,6 +1009,19 @@ let pipe_tests () =
   let vj = inp vn (Model.I_char (Uchar.of_char 'J')) in
   check_int "pipe.vim-J" 1 vj.Model.cur;
   check_int "pipe.vim-K" 0 (inp vj (Model.I_char (Uchar.of_char 'K'))).Model.cur;
+  (* gj/gk are the cross-step vertical motion; j/k stay within the step
+     (they scroll in single-line mode) *)
+  let gj =
+    inp (inp vn (Model.I_char (Uchar.of_char 'g'))) (Model.I_char (Uchar.of_char 'j'))
+  in
+  check_int "pipe.vim-gj" 1 gj.Model.cur;
+  check_int "pipe.vim-gk" 0
+    (inp (inp gj (Model.I_char (Uchar.of_char 'g'))) (Model.I_char (Uchar.of_char 'k')))
+      .Model.cur;
+  let vlines = with_lines 30 vn in
+  let vjj = inp vlines (Model.I_char (Uchar.of_char 'j')) in
+  check_int "pipe.vim-j-scrolls" 1 vjj.Model.scroll;
+  check_int "pipe.vim-j-stays" 0 vjj.Model.cur;
 
   (* render: one prompt row per step, cursor on the focused step, step
      indicator in the status bar *)

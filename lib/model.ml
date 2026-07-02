@@ -38,6 +38,12 @@ type key =
   | Step_next
   | Scroll_up
   | Scroll_down
+  | Cursor_up
+      (** Up/Down (vim [gk]/[gj]): move the cursor vertically through the
+          whole input area — across a multiline step's lines, then on into
+          the neighbouring step (keeping the on-screen column); scrolls the
+          output when there is nowhere to move *)
+  | Cursor_down
   | Scroll_output_up  (** always scrolls, even when Up/Down move the cursor *)
   | Scroll_output_down
   | Page_up
@@ -411,6 +417,32 @@ let with_scroll ~view_h t s =
 
 let nl_uchar = Uchar.of_char '\n'
 
+(* start/end position of the line containing [pos] in [us] *)
+let line_start_of us pos =
+  let rec go i =
+    if i <= 0 then 0
+    else if Uchar.equal us.(i - 1) nl_uchar then i
+    else go (i - 1)
+  in
+  go pos
+
+let line_end_of us pos =
+  let len = Array.length us in
+  let rec go i =
+    if i >= len then len
+    else if Uchar.equal us.(i) nl_uchar then i
+    else go (i + 1)
+  in
+  go pos
+
+(** Same text, cursor at column [col] of the line it is on (clamped to the
+    line's length). *)
+let with_col ed col =
+  let us = Array.of_list (Editor.to_uchars ed) in
+  let cur = Editor.cursor ed in
+  let start = line_start_of us cur in
+  Editor.with_cursor ed (start + min col (line_end_of us cur - start))
+
 (** Move the cursor one line up ([dir = -1]) or down ([dir = 1]) within a
     multi-line text, preserving the column when possible (clamped to the
     target line's length). At the first/last line the editor is returned
@@ -419,31 +451,44 @@ let cursor_vert ~dir ed =
   let us = Array.of_list (Editor.to_uchars ed) in
   let len = Array.length us in
   let cur = Editor.cursor ed in
-  let line_start p =
-    let rec go i =
-      if i <= 0 then 0 else if Uchar.equal us.(i - 1) nl_uchar then i else go (i - 1)
-    in
-    go p
-  in
-  let line_end p =
-    let rec go i =
-      if i >= len then len else if Uchar.equal us.(i) nl_uchar then i else go (i + 1)
-    in
-    go p
-  in
-  let start = line_start cur in
+  let start = line_start_of us cur in
   let col = cur - start in
   if dir < 0 then
     if start = 0 then ed
     else
-      let pstart = line_start (start - 1) in
+      let pstart = line_start_of us (start - 1) in
       Editor.with_cursor ed (pstart + min col (start - 1 - pstart))
   else
-    let e = line_end cur in
+    let e = line_end_of us cur in
     if e >= len then ed
     else
       let nstart = e + 1 in
-      Editor.with_cursor ed (nstart + min col (line_end nstart - nstart))
+      Editor.with_cursor ed (nstart + min col (line_end_of us nstart - nstart))
+
+(* The on-screen width of a step's prompt region: the fixed command line
+   plus "> " (mirroring the renderer). *)
+let prompt_width t i =
+  let flen = Editor.length t.steps.(i).fixed in
+  if flen = 0 then 2 else flen + 2
+
+(** On-screen column of the current step's args cursor: the prompt width on
+    the step's first line, the 2-column indent on continuation lines. *)
+let args_visual_col t =
+  let ed = editor t in
+  let us = Array.of_list (Editor.to_uchars ed) in
+  let cur = Editor.cursor ed in
+  let start = line_start_of us cur in
+  (if start = 0 then prompt_width t t.cur else 2) + (cur - start)
+
+(** Put the current step's args cursor at on-screen column [vcol], clamped
+    into the line it is on. *)
+let args_to_visual t vcol =
+  let ed = editor t in
+  let start =
+    line_start_of (Array.of_list (Editor.to_uchars ed)) (Editor.cursor ed)
+  in
+  let off = if start = 0 then prompt_width t t.cur else 2 in
+  set_editor t (with_col ed (max 0 (vcol - off)))
 
 (* --- semantic actions --- *)
 
@@ -502,9 +547,42 @@ let handle_key ~view_h t key =
       in
       if target = t.cur then Continue (t, [])
       else
-        (* landing on another step puts the cursor in its args line *)
+        (* landing on another step keeps the cursor in the same field, at
+           the same on-screen column (the prompts differ in width) *)
         let focus = match t.focus with F_output -> F_args | f -> f in
-        Continue ({ t with cur = target; focus; vpending = P_none }, [])
+        if focus = F_fixed then
+          (* the fixed region starts at column 0 in every step *)
+          let col = Editor.cursor (fixed_editor t) in
+          let t = { t with cur = target; vpending = P_none } in
+          Continue (set_focused t (with_col (focused t) col), [])
+        else
+          let vcol = args_visual_col t in
+          let t = { t with cur = target; focus; vpending = P_none } in
+          Continue (args_to_visual t vcol, [])
+  | Cursor_up | Cursor_down ->
+      let dir = if key = Cursor_down then 1 else -1 in
+      if t.focus <> F_args then with_scroll ~view_h t (t.scroll + dir)
+      else
+        let moved = if t.multiline then cursor_vert ~dir ed else ed in
+        if moved != ed then with_motion t moved
+        else
+          let target = t.cur + dir in
+          if target < 0 || target >= nsteps t then
+            (* nothing above/below: scroll, unless motion keys would be
+               expected to stop (several steps or several lines) *)
+            if nsteps t > 1 || t.multiline then Continue (t, [])
+            else with_scroll ~view_h t (t.scroll + dir)
+          else
+            (* cross into the adjacent step: nearest line, same on-screen
+               column *)
+            let vcol = args_visual_col t in
+            let ted = t.steps.(target).args in
+            let ted =
+              Editor.with_cursor ted
+                (if dir < 0 then Editor.length ted else 0)
+            in
+            let t = { t with cur = target; vpending = P_none } in
+            Continue (args_to_visual (set_editor t ted) vcol, [])
   | Focus_next | Focus_prev ->
       (* the regions in on-screen order — fixed command, args, output; Tab
          moves toward the output, Shift-Tab toward the command, stopping at
@@ -580,8 +658,8 @@ let emacs_action ~pipe input : key option =
       | S_delete -> Some Delete
       | S_left -> Some Left
       | S_right -> Some Right
-      | S_up -> Some Scroll_up
-      | S_down -> Some Scroll_down
+      | S_up -> Some Cursor_up
+      | S_down -> Some Cursor_down
       | S_home -> Some Home
       | S_end -> Some End
       | S_pgup -> Some Page_up
@@ -876,6 +954,8 @@ let vim_normal ~view_h t input =
       | Some m -> vim_apply_op clear_pending ~op m
       | None -> Continue (clear_pending, []))
   | P_g, _, Some 'g' -> handle_key ~view_h clear_pending Scroll_top
+  | P_g, _, Some 'j' -> handle_key ~view_h clear_pending Cursor_down
+  | P_g, _, Some 'k' -> handle_key ~view_h clear_pending Cursor_up
   | P_z, _, Some 'Z' -> Accept_exit (* ZZ: accept and exit *)
   | P_z, _, Some 'Q' -> Quit_exit (* ZQ: cancel *)
   | (P_replace | P_find _ | P_op _ | P_g | P_z), I_special S_escape, _
@@ -941,7 +1021,8 @@ let handle_output_focus ~view_h t input =
   | _ -> (
       match emacs_action ~pipe:(nsteps t > 1) input with
       | Some
-          (( Scroll_up | Scroll_down | Scroll_output_up | Scroll_output_down
+          (( Scroll_up | Scroll_down | Cursor_up | Cursor_down
+           | Scroll_output_up | Scroll_output_down
            | Page_up | Page_down | Toggle_single | Toggle_ansi
            | Focus_next | Focus_prev | Step_prev | Step_next | Enter | Submit
            | Redraw | Accept | Quit ) as key)

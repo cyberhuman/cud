@@ -106,7 +106,8 @@ Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
 | C-t | toggle single-argument mode |
 | M-a | toggle ANSI color rendering (`--ansi`) |
 | C-p/C-n | previous/next pipe step (`-p`); otherwise scroll output |
-| Up/Down, PgUp/PgDn | scroll output |
+| Up/Down | move the cursor across input lines and pipe steps (`-M`/`-p`); otherwise scroll output |
+| PgUp/PgDn | scroll output |
 | Ctrl/Shift+Up/Down | scroll output (even from the input in `-M`) |
 | C-d | accept: exit 0 and print the arguments |
 | Esc, C-c | cancel: exit 130 |
@@ -134,9 +135,11 @@ ps aux | cud -p -- 'grep ssh' 'wc -l'
 Quote a step that has fixed arguments (it is one `CMD` argument, split
 shell-style once inside); a step given as an empty string — or emptied at
 runtime — simply drops out of the pipeline. Ctrl-P/Ctrl-N move the cursor
-between the steps (`J`/`K` in vim normal mode); the status bar shows which
-step is current (`[1/2]`). Tab, single-argument mode, `-I` and everything
-else work per step. Repeat `-i` to seed several steps:
+between the steps (`J`/`K` in vim normal mode), keeping its on-screen
+column; Up/Down (vim `gj`/`gk`) do the same vertically — through the lines
+of a multiline step first, then on into the neighbouring step. The status
+bar shows which step is current (`[1/2]`). Tab, single-argument mode, `-I`
+and everything else work per step. Repeat `-i` to seed several steps:
 
 ```
 printf '%s\n' foo bar boo | cud -p -i o -i 'a-z A-Z' -- grep tr
@@ -214,7 +217,9 @@ mode, shown in the status bar:
 - `i` `a` `I` `A` enter insert mode (`-M`: also `o`/`O` to open a line
   below/above); `p`/`P` paste the register;
   `u`/`C-r` undo/redo
-- output scrolling: `j` `k` `G` `gg`; `J`/`K` switch pipe steps (`-p`)
+- output scrolling: `j` `k` `G` `gg` (`-M`: `j`/`k` move across the step's
+  input lines instead); `J`/`K` switch pipe steps (`-p`), `gj`/`gk` move
+  vertically across input lines *and* steps
 - Enter re-runs; `ZZ` or C-d accepts; `ZQ` or C-c cancels (Escape never
   quits in vim mode)
 
