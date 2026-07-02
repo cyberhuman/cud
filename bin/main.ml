@@ -21,9 +21,13 @@ let print_args mode args command out_lines =
   | `Output -> List.iter print_endline out_lines
 
 let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi
-    ~multiline ~lenses ~hints ~placeholder ~pipe ~output cmdline =
+    ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail ~output cmdline =
   if (not pipe) && List.length initials > 1 then begin
     prerr_endline "cud: --initial repeated: only meaningful with --pipe";
+    124
+  end
+  else if pipefail && not pipe then begin
+    prerr_endline "cud: --pipefail: only meaningful with --pipe";
     124
   end
   else begin
@@ -39,6 +43,7 @@ let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi
       placeholder;
       initials;
       pipe;
+      pipefail;
       auto = not manual;
       debounce;
       single;
@@ -85,6 +90,15 @@ let pipe =
            its own prompt and editable arguments, stacked at the top. Switch \
            between steps with Ctrl-P/Ctrl-N (vim normal mode: J/K). A step \
            left empty drops out of the pipeline.")
+
+let pipefail =
+  Arg.(
+    value & flag
+    & info [ "P"; "pipefail" ]
+        ~doc:
+          "With $(b,--pipe), the pipeline fails if any step fails ($(b,set \
+           -o pipefail)) instead of reporting only the last step's exit \
+           code.")
 
 let manual =
   Arg.(
@@ -250,10 +264,11 @@ let cmd =
     and+ hints
     and+ placeholder
     and+ pipe
+    and+ pipefail
     and+ output
     and+ cmdline in
     run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi
-      ~multiline ~lenses ~hints ~placeholder ~pipe ~output cmdline
+      ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail ~output cmdline
   in
   Cmd.v (Cmd.info "cud" ~doc ~man) term
 

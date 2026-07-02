@@ -906,6 +906,17 @@ let pipe_tests () =
     (b.Model.parse_error = Some Shellwords.Unterminated_single_quote);
   check "pipe.command-error" (Result.is_error (Model.command b));
 
+  (* --pipefail wraps the pipeline; the -c output stays paste-friendly *)
+  let pf =
+    Model.create ~pipefail:true ~steps:[ ("grep o", ""); ("sort", "") ]
+      ~fixed_args:[] ~initial:"" ()
+  in
+  check "pipe.pipefail-command"
+    (Model.command pf
+    = Ok (Some ("sh", [ "-c"; "set -o pipefail; grep o | sort" ])));
+  check_str "pipe.pipefail-command_string" "grep o | sort"
+    (Model.command_string pf);
+
   (* per-step args at exit *)
   check "pipe.all-args"
     (Model.all_args (mk [ ("grep", "o"); ("tr", "a b") ])

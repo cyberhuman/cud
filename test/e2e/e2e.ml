@@ -923,6 +923,29 @@ let test_pipe_args_output () =
     Printf.printf "FAIL pipe-args: printed %S\n" printed
   end
 
+let test_pipefail () =
+  (* -P: a failing first step fails the pipeline, and accepting propagates
+     its exit code *)
+  let sess =
+    spawn "pipefail"
+      (Printf.sprintf "printf 'x\\n' | %s --debounce 0.05 -p -P -- false cat"
+         (quote cud))
+  in
+  expect_row sess 0 "false>";
+  expect_row sess 1 "cat>";
+  expect_status sess "exit 1";
+  send sess (ctrl 'd');
+  expect_exit sess 1;
+  (* without -P the shell reports the last step's exit code *)
+  let sess =
+    spawn "pipefail-off"
+      (Printf.sprintf "printf 'x\\n' | %s --debounce 0.05 -p -- false cat"
+         (quote cud))
+  in
+  expect_status sess "exit 0";
+  send sess (ctrl 'd');
+  expect_exit sess 0
+
 let test_lens () =
   let sess =
     spawn "lens"
@@ -992,6 +1015,7 @@ let () =
       ("ctrl-o-submit", test_ctrl_o_submit);
       ("pipe", test_pipe);
       ("pipe-args", test_pipe_args_output);
+      ("pipefail", test_pipefail);
       ("lens", test_lens);
       ("hint", test_hint);
     ]

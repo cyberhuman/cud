@@ -58,6 +58,8 @@ Flags:
   (with `-p`, repeat to give each step its initial arguments, in order)
 - `-p`, `--pipe` — every `CMD` argument is one step of a shell pipeline
   (see below)
+- `-P`, `--pipefail` — the pipeline fails if any step fails (`set -o
+  pipefail`); by default the last step's exit code wins, shell-style
 - `-m`, `--manual` — re-run only on Enter instead of after every edit
 - `--debounce=SECONDS` — delay before the automatic re-run (default 0.3)
 - `-1`, `--single` — start in single-argument mode
@@ -135,6 +137,11 @@ printf '%s\n' foo bar boo | cud -p -i o -i 'a-z A-Z' -- grep tr
 
 On accept, the default output prints one line of quoted arguments per step;
 `-c` prints the whole pipeline, ready to paste.
+
+The exit code shown (and propagated on accept) is the last step's, as in a
+shell; with `-P`/`--pipefail` the pipeline runs under `set -o pipefail`, so
+any failing step fails the whole run. The `-c` output stays the plain
+pipeline either way.
 
 ### Multiline mode (`-M`)
 

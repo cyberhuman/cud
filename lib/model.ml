@@ -118,6 +118,8 @@ type t = {
   parse_error : Shellwords.error option;
   single : bool;
       (** pass the whole line as one argument instead of word-splitting *)
+  pipefail : bool;
+      (** the pipeline fails if any step fails, not just the last one *)
   vim : bool;  (** vim keybindings enabled *)
   enter_accept : bool;  (** Enter accepts and exits instead of re-running *)
   ansi : bool;  (** respect SGR sequences in the output instead of stripping *)
@@ -181,10 +183,10 @@ let compute_parse_error t =
 (** [steps] ([--pipe]): one [(fixed_line, initial_args)] pair per pipeline
     step; when empty, a single step is built from [cmd]/[fixed_args]/
     [initial]. *)
-let create ?cmd ?placeholder ?(single = false) ?(vim = false)
-    ?(enter_accept = false) ?(ansi = false) ?(multiline = false)
-    ?(lenses = []) ?(hints = []) ?(steps = []) ~fixed_args
-    ~initial () =
+let create ?cmd ?placeholder ?(single = false) ?(pipefail = false)
+    ?(vim = false) ?(enter_accept = false) ?(ansi = false)
+    ?(multiline = false) ?(lenses = []) ?(hints = []) ?(steps = [])
+    ~fixed_args ~initial () =
   let mk (fixed_line, init) =
     { fixed = Editor.of_string fixed_line; args = Editor.of_string init }
   in
@@ -215,6 +217,7 @@ let create ?cmd ?placeholder ?(single = false) ?(vim = false)
     status = None;
     parse_error = None;
     single;
+    pipefail;
     vim;
     enter_accept;
     ansi;
@@ -316,7 +319,12 @@ let command t =
     match frags [] (Array.to_list t.steps) with
     | Error e -> Error e
     | Ok [] -> Ok None
-    | Ok fs -> Ok (Some ("sh", [ "-c"; String.concat " | " fs ]))
+    | Ok fs ->
+        let joined = String.concat " | " fs in
+        let joined =
+          if t.pipefail then "set -o pipefail; " ^ joined else joined
+        in
+        Ok (Some ("sh", [ "-c"; joined ]))
 
 (** The command of the step being edited (for the hint environment). *)
 let current_command t =

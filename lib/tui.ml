@@ -13,6 +13,9 @@ type opts = {
       (** initial argument lines; with [--pipe] one per step, in order *)
   pipe : bool;
       (** each positional argument is one step of a shell pipeline *)
+  pipefail : bool;
+      (** the pipeline's exit code reflects any failing step, not just the
+          last one *)
   auto : bool;  (** re-run automatically after edits *)
   debounce : float;  (** seconds to wait after the last edit *)
   single : bool;  (** start in single-argument mode *)
@@ -360,7 +363,8 @@ let run (opts : opts) : result Lwt.t =
               Option.value (List.nth_opt opts.initials i) ~default:"" ))
     in
     Model.create ?cmd:opts.cmd ?placeholder:opts.placeholder ~steps
-      ~single:opts.single ~vim:opts.vim ~enter_accept:opts.enter_accept
+      ~single:opts.single ~pipefail:opts.pipefail ~vim:opts.vim
+      ~enter_accept:opts.enter_accept
       ~ansi:opts.ansi ~multiline:opts.multiline ~lenses:opts.lenses
       ~hints:opts.hints ~fixed_args:opts.fixed_args
       ~initial:(Option.value (List.nth_opt opts.initials 0) ~default:"")
