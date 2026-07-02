@@ -20,7 +20,7 @@ let print_args mode args command out_lines =
   | `Command -> print_endline command
   | `Output -> List.iter print_endline out_lines
 
-let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi
+let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~wrap
     ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail ~output cmdline =
   if (not pipe) && List.length initials > 1 then begin
     prerr_endline "cud: --initial repeated: only meaningful with --pipe";
@@ -50,6 +50,7 @@ let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi
       vim;
       enter_accept;
       ansi;
+      wrap;
       multiline;
       lenses;
       hints;
@@ -203,6 +204,14 @@ let ansi =
            output instead of stripping them. Other escape sequences are \
            still removed. Toggle at runtime with Alt-A.")
 
+let wrap =
+  Arg.(
+    value & flag
+    & info [ "w"; "wrap" ]
+        ~doc:
+          "Wrap long output lines onto continuation rows instead of \
+           cropping them at the screen edge. Toggle at runtime with Alt-W.")
+
 let placeholder =
   Arg.(
     value & opt (some string) None
@@ -264,6 +273,7 @@ let cmd =
     and+ vim
     and+ enter_accept
     and+ ansi
+    and+ wrap
     and+ multiline
     and+ lenses
     and+ hints
@@ -272,7 +282,7 @@ let cmd =
     and+ pipefail
     and+ output
     and+ cmdline in
-    run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi
+    run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~wrap
       ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail ~output cmdline
   in
   Cmd.v (Cmd.info "cud" ~doc ~man) term

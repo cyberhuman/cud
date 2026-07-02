@@ -73,6 +73,8 @@ Flags:
 - `-M`, `--multiline` — multi-line argument editor (see below)
 - `-A`, `--ansi` — respect ANSI SGR sequences (colors, bold, …) in the command's
   output instead of stripping them; other escape sequences are still removed
+- `-w`, `--wrap` — wrap long output lines onto continuation rows instead of
+  cropping them at the screen edge
 - `--lens CMD`, `--hint CMD` — second pane with derived views (see below;
   repeatable)
 - `--vim` — vim keybindings (see below)
@@ -105,6 +107,7 @@ Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
 | Enter | re-run now (`-M`: insert a line break; `-e`: accept) |
 | C-t | toggle single-argument mode |
 | M-a | toggle ANSI color rendering (`--ansi`) |
+| M-w | toggle output line wrapping (`--wrap`) |
 | C-p/C-n | previous/next pipe step (`-p`); otherwise scroll output |
 | Up/Down | move the cursor across input lines and pipe steps (`-M`/`-p`); otherwise scroll output |
 | PgUp/PgDn | scroll output |

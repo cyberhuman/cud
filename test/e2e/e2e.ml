@@ -730,6 +730,27 @@ let test_no_ansi () =
   send sess (ctrl 'c');
   expect_exit sess 130
 
+let test_wrap () =
+  (* -w: a 100-character line wraps onto a second row on the 80-column pty *)
+  let long = String.make 100 'x' in
+  let sess =
+    spawn "wrap"
+      (Printf.sprintf "printf %%s %s | %s -w --debounce 0.05 cat" long
+         (quote cud))
+  in
+  expect_row sess 1 (String.make 80 'x');
+  expect_row sess 2 (String.make 20 'x');
+  expect_status sess "[wrap]";
+  (* Alt-W turns wrapping off: back to cropping *)
+  send sess "\x1bw";
+  expect_row sess 1 (String.make 80 'x');
+  expect_row sess 2 "";
+  expect_no_status sess "[wrap]";
+  send sess "\x1bw";
+  expect_row sess 2 (String.make 20 'x');
+  send sess (ctrl 'c');
+  expect_exit sess 130
+
 let test_multiline () =
   (* a 30-element array so the output is taller than the viewport *)
   let big_json =
@@ -1049,6 +1070,7 @@ let () =
       ("tab-output", test_tab_output_single_line);
       ("ansi", test_ansi);
       ("no-ansi", test_no_ansi);
+      ("wrap", test_wrap);
       ("multiline", test_multiline);
       ("ml-enter-accept", test_multiline_enter_accept);
       ("ctrl-o-submit", test_ctrl_o_submit);

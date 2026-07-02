@@ -22,6 +22,7 @@ type opts = {
   vim : bool;  (** vim keybindings *)
   enter_accept : bool;  (** Enter accepts and exits *)
   ansi : bool;  (** respect SGR color sequences in the output *)
+  wrap : bool;  (** wrap long output lines instead of cropping them *)
   multiline : bool;  (** multi-line args editor *)
   lenses : string list;  (** [--lens] commands for the second pane *)
   hints : string list;  (** [--hint] commands for the second pane *)
@@ -368,7 +369,8 @@ let run (opts : opts) : result Lwt.t =
     Model.create ?cmd:opts.cmd ?placeholder:opts.placeholder ~steps
       ~single:opts.single ~pipefail:opts.pipefail ~vim:opts.vim
       ~enter_accept:opts.enter_accept
-      ~ansi:opts.ansi ~multiline:opts.multiline ~lenses:opts.lenses
+      ~ansi:opts.ansi ~wrap:opts.wrap ~multiline:opts.multiline
+      ~lenses:opts.lenses
       ~hints:opts.hints ~fixed_args:opts.fixed_args
       ~initial:(Option.value (List.nth_opt opts.initials 0) ~default:"")
       ()

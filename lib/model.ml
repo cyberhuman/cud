@@ -32,6 +32,7 @@ type key =
           the multiline newline binding *)
   | Toggle_single
   | Toggle_ansi
+  | Toggle_wrap
   | Focus_next  (** Tab: move the focus toward the output *)
   | Focus_prev  (** Shift-Tab: move the focus toward the fixed command *)
   | Step_prev  (** focus the previous/next pipeline step ([--pipe]) *)
@@ -130,6 +131,7 @@ type t = {
   vim : bool;  (** vim keybindings enabled *)
   enter_accept : bool;  (** Enter accepts and exits instead of re-running *)
   ansi : bool;  (** respect SGR sequences in the output instead of stripping *)
+  wrap : bool;  (** wrap long output lines instead of cropping them *)
   multiline : bool;  (** the args editor holds multiple lines *)
   vmode : vmode;
   vpending : vim_pending;
@@ -191,7 +193,7 @@ let compute_parse_error t =
     step; when empty, a single step is built from [cmd]/[fixed_args]/
     [initial]. *)
 let create ?cmd ?placeholder ?(single = false) ?(pipefail = false)
-    ?(vim = false) ?(enter_accept = false) ?(ansi = false)
+    ?(vim = false) ?(enter_accept = false) ?(ansi = false) ?(wrap = false)
     ?(multiline = false) ?(lenses = []) ?(hints = []) ?(steps = [])
     ~fixed_args ~initial () =
   let mk (fixed_line, init) =
@@ -228,6 +230,7 @@ let create ?cmd ?placeholder ?(single = false) ?(pipefail = false)
     vim;
     enter_accept;
     ansi;
+    wrap;
     multiline;
     vmode = V_insert;
     vpending = P_none;
@@ -376,7 +379,12 @@ let command_string t =
 type effect_ = Schedule_rerun | Start_run
 type reaction = Continue of t * effect_ list | Accept_exit | Quit_exit
 
-let max_scroll ~view_h t = max 0 (Array.length t.lines - max 1 view_h)
+(* With wrapping, lines occupy several display rows, so the bottom rows may
+   only be reachable with the last line alone at the top: allow scrolling
+   any line there (the renderer never shows a blank screen mid-list). *)
+let max_scroll ~view_h t =
+  if t.wrap then max 0 (Array.length t.lines - 1)
+  else max 0 (Array.length t.lines - max 1 view_h)
 
 let clamp_scroll ~view_h t s =
   let s = min s (max_scroll ~view_h t) in
@@ -540,6 +548,7 @@ let handle_key ~view_h t key =
       let t = { t with single = not t.single } in
       Continue ({ t with parse_error = compute_parse_error t }, [ Start_run ])
   | Toggle_ansi -> Continue ({ t with ansi = not t.ansi }, [])
+  | Toggle_wrap -> Continue ({ t with wrap = not t.wrap }, [])
   | Step_prev | Step_next ->
       let target =
         let d = if key = Step_next then 1 else -1 in
@@ -645,6 +654,7 @@ let emacs_action ~pipe input : key option =
   | I_meta c -> (
       match c with
       | 'a' -> Some Toggle_ansi
+      | 'w' -> Some Toggle_wrap
       | 'b' -> Some Word_left
       | 'f' -> Some Word_right
       | _ -> None)
@@ -1023,7 +1033,7 @@ let handle_output_focus ~view_h t input =
       | Some
           (( Scroll_up | Scroll_down | Cursor_up | Cursor_down
            | Scroll_output_up | Scroll_output_down
-           | Page_up | Page_down | Toggle_single | Toggle_ansi
+           | Page_up | Page_down | Toggle_single | Toggle_ansi | Toggle_wrap
            | Focus_next | Focus_prev | Step_prev | Step_next | Enter | Submit
            | Redraw | Accept | Quit ) as key)
         ->

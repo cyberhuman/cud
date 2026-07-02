@@ -1237,6 +1237,81 @@ let ansi_tests () =
   in
   check_int "ansi.render-crop" 20 (Render.ulength (Render.row_text (row1 long)))
 
+(* --- Output line wrapping (-w) --- *)
+
+let wrap_tests () =
+  let has hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+    nl = 0 || go 0
+  in
+  let mkw ~wrap texts =
+    {
+      (Model.create ~wrap ~cmd:"cat" ~fixed_args:[] ~initial:"" ()) with
+      Model.lines =
+        Array.of_list
+          (List.map (fun t -> { Model.kind = Model.Out; text = t }) texts);
+      status = Some (Model.Exited 0);
+    }
+  in
+  (* a long line wraps onto continuation rows instead of being cropped *)
+  let m = mkw ~wrap:true [ "abcdefghijklm"; "xy" ] in
+  check_rows "wrap.render"
+    [
+      "cat>      ";
+      "abcdefghij";
+      "klm       ";
+      "xy        ";
+      " exit 0   ";
+    ]
+    (Render.to_strings (Render.render ~w:10 ~h:5 m));
+  let off = mkw ~wrap:false [ "abcdefghijklm"; "xy" ] in
+  let rows = Render.to_strings (Render.render ~w:10 ~h:5 off) in
+  check_str "wrap.off-crops" "abcdefghij" (List.nth rows 1);
+  check_str "wrap.off-next-line" "xy" (String.trim (List.nth rows 2));
+
+  (* the [wrap] indicator shows in the (wide enough) status bar *)
+  let bar m = List.nth (Render.to_strings (Render.render ~w:40 ~h:4 m)) 3 in
+  check "wrap.indicator" (has (bar m) "[wrap]");
+  check "wrap.no-indicator" (not (has (bar off) "[wrap]"));
+
+  (* the status range counts logical lines actually visible *)
+  let big = mkw ~wrap:true [ String.make 95 'a'; "b"; "c"; "d" ] in
+  (* w=40: the first line takes 3 rows, so 4 view rows show lines 1-2 *)
+  let bigbar = List.nth (Render.to_strings (Render.render ~w:40 ~h:6 big)) 5 in
+  check "wrap.range" (has bigbar "1-2/4");
+
+  (* M-w toggles at runtime; no re-run, just a re-render *)
+  (match Model.handle_input ~view_h:5 off (Model.I_meta 'w') with
+  | Model.Continue (m', []) ->
+      check "wrap.toggle-on" m'.Model.wrap;
+      (match Model.handle_input ~view_h:5 m' (Model.I_meta 'w') with
+      | Model.Continue (m'', []) -> check "wrap.toggle-off" (not m''.Model.wrap)
+      | _ -> fail "wrap.toggle-back" "unexpected reaction")
+  | _ -> fail "wrap.toggle" "unexpected reaction");
+
+  (* wrapping allows scrolling any line to the top, so wrapped tails of the
+     last lines stay reachable *)
+  check_int "wrap.max-scroll" 3 (Model.max_scroll ~view_h:2 big);
+  check_int "wrap.max-scroll-off" 2
+    (Model.max_scroll ~view_h:2 { big with Model.wrap = false });
+
+  (* ANSI attributes survive the wrap; rows stay exactly [w] wide *)
+  let colored =
+    {
+      (mkw ~wrap:true [ "\x1b[31m" ^ String.make 12 'r' ]) with
+      Model.ansi = true;
+    }
+  in
+  let frame = Render.render ~w:10 ~h:4 colored in
+  (match List.nth frame.Render.rows 1 with
+  | [ (Render.Ansi a, s) ] ->
+      check "wrap.ansi-first-row" (a.Render.fg = Some (Render.Idx 1) && s = "rrrrrrrrrr")
+  | _ -> fail "wrap.ansi-row0" "unexpected segment structure");
+  (match List.nth frame.Render.rows 2 with
+  | (Render.Ansi _, "rr") :: _ -> ()
+  | _ -> fail "wrap.ansi-row1" "unexpected segment structure")
+
 let render_invariants () =
   let base = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"" () in
   let states =
@@ -1282,6 +1357,32 @@ let render_invariants () =
            ~fixed_args:[] ~initial:"" ()
        in
        { (with_lines 10 m) with Model.scroll = 3 });
+      {
+        (Model.create ~wrap:true ~ansi:true ~cmd:"cat" ~fixed_args:[]
+           ~initial:"" ())
+        with
+        Model.lines =
+          [|
+            { Model.kind = Out; text = String.make 200 'x' };
+            { Model.kind = Out; text = "\x1b[32m" ^ String.make 90 'g' };
+            { Model.kind = Err; text = "short" };
+          |];
+        scroll = 2;
+        status = Some (Model.Exited 0);
+      };
+      (let m =
+         Model.create ~wrap:true ~cmd:"jq" ~fixed_args:[] ~initial:""
+           ~lenses:[ "head -1" ] ()
+       in
+       let m =
+         {
+           m with
+           Model.lines =
+             Array.init 8 (fun i ->
+                 { Model.kind = Out; text = String.make (20 * (i + 1)) 'y' });
+         }
+       in
+       Model.set_pane m 0 [| { Model.kind = Out; text = String.make 60 'p' } |]);
       (let m =
          Model.create ~multiline:true
            ~steps:[ ("jq", ".a\n.b"); ("wc", "-l") ]
@@ -1399,6 +1500,7 @@ let () =
   pane_tests ();
   ansi_tests ();
   ansi_toggle_tests ();
+  wrap_tests ();
   render_invariants ();
   runner_tests ();
   if !failures > 0 then begin

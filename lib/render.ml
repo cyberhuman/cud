@@ -253,6 +253,27 @@ let ansi_segments s =
   flush ();
   List.rev !segs
 
+(** Split styled segments into rows of exactly [w] characters (at least one
+    row); the last row is padded with the [pad] style. *)
+let wrap_segs ~pad w segs =
+  let rec take_row budget acc segs =
+    match segs with
+    | [] -> (List.rev acc, [], budget)
+    | (st, s) :: rest ->
+        let n = ulength s in
+        if n = 0 then take_row budget acc rest
+        else if n <= budget then take_row (budget - n) ((st, s) :: acc) rest
+        else
+          let head = usub s 0 budget and tail = usub s budget (n - budget) in
+          (List.rev ((st, head) :: acc), (st, tail) :: rest, 0)
+  in
+  let rec rows segs =
+    let row, rest, rem = take_row w [] segs in
+    let row = if rem > 0 then row @ [ (pad, String.make rem ' ') ] else row in
+    if rest = [] then [ row ] else row :: rows rest
+  in
+  rows segs
+
 (** Crop or pad a segment list to exactly [w] characters; padding gets the
     [pad] style. *)
 let fit_segs ~pad w segs =
@@ -273,6 +294,15 @@ let style_of_kind = function
   | Model.Out -> Out_text
   | Model.Err -> Err_text
   | Model.Info -> Info_text
+
+(** Display rows a line occupies when wrapped ([--wrap]). *)
+let line_height ~ansi ~w (line : Model.line) =
+  let len =
+    if not ansi then ulength (sanitize_line line.text)
+    else
+      List.fold_left (fun n (_, s) -> n + ulength s) 0 (ansi_segments line.text)
+  in
+  max 1 ((len + w - 1) / max 1 w)
 
 (* Flatten styled [parts] to per-character styles, take [w] columns starting
    at [hscroll], pad with Input spaces, regroup into segments. *)
@@ -439,7 +469,22 @@ let status_row ~w ~view_h (m : Model.t) =
   let scroll = Model.clamp_scroll ~view_h m m.scroll in
   let range =
     if count = 0 then ""
-    else Printf.sprintf "%d-%d/%d  " (scroll + 1) (min count (scroll + view_h)) count
+    else
+      let last =
+        if not m.wrap then min count (scroll + view_h)
+        else
+          (* wrapped lines take several rows: walk until the viewport is
+             full, at the width the output actually gets (panes halve it) *)
+          let ow =
+            if Array.length m.panes = 0 || w < 20 then w else w / 2
+          in
+          let rec go i rows =
+            if i >= count || rows >= view_h then i
+            else go (i + 1) (rows + line_height ~ansi:m.ansi ~w:ow m.lines.(i))
+          in
+          go scroll 0
+      in
+      Printf.sprintf "%d-%d/%d  " (scroll + 1) last count
   in
   let vim_mode =
     if not m.vim then ""
@@ -447,6 +492,7 @@ let status_row ~w ~view_h (m : Model.t) =
   in
   let mode = if m.single then " [1 arg] " else "" in
   let ansi_ind = if m.ansi then " [ansi] " else "" in
+  let wrap_ind = if m.wrap then " [wrap] " else "" in
   let step_ind =
     let n = Model.nsteps m in
     if n > 1 then Printf.sprintf " [%d/%d] " (m.Model.cur + 1) n else ""
@@ -460,7 +506,8 @@ let status_row ~w ~view_h (m : Model.t) =
   let hints = "enter run · ^D accept · esc quit " in
   let leftw =
     ulength vim_mode + ulength state + ulength parse + ulength mode
-    + ulength ansi_ind + ulength step_ind + ulength focus_ind
+    + ulength ansi_ind + ulength wrap_ind + ulength step_ind
+    + ulength focus_ind
   in
   (* Right-hand side: drop the hints, then the range, as space runs out. *)
   let right =
@@ -478,6 +525,7 @@ let status_row ~w ~view_h (m : Model.t) =
         (Bar_alert, parse);
         (Bar, mode);
         (Bar, ansi_ind);
+        (Bar, wrap_ind);
         (Bar, step_ind);
         (Bar, focus_ind);
         (Bar, String.make mid ' ' ^ right);
@@ -506,24 +554,54 @@ let status_row ~w ~view_h (m : Model.t) =
     in
     crop [] w segs
 
-(** One output line as a row of exactly [w] characters. With [--ansi] the
-    line is split on its SGR sequences; segments with all-default attributes
-    keep the line kind's style (stderr stays red). *)
-let output_line ~ansi ~w (line : Model.line) =
+(** One output line as one or more rows of exactly [w] characters: cropped
+    to a single row normally, wrapped onto several with [--wrap]. With
+    [--ansi] the line is split on its SGR sequences; segments with
+    all-default attributes keep the line kind's style (stderr stays red). *)
+let output_line_rows ~ansi ~wrap ~w (line : Model.line) =
   let base = style_of_kind line.kind in
-  if not ansi then [ (base, fit w (sanitize_line line.text)) ]
+  if (not ansi) && not wrap then
+    [ [ (base, fit w (sanitize_line line.text)) ] ]
   else
-    ansi_segments line.text
-    |> List.map (fun (a, s) -> ((if a = ansi_default then base else Ansi a), s))
-    |> fit_segs ~pad:base w
+    let segs =
+      if not ansi then [ (base, sanitize_line line.text) ]
+      else
+        ansi_segments line.text
+        |> List.map (fun (a, s) ->
+               ((if a = ansi_default then base else Ansi a), s))
+    in
+    if wrap then wrap_segs ~pad:base w segs else [ fit_segs ~pad:base w segs ]
+
+let output_line ~ansi ~w line =
+  List.hd (output_line_rows ~ansi ~wrap:false ~w line)
 
 let output_rows ~w ~view_h (m : Model.t) =
   let count = Array.length m.lines in
   let scroll = Model.clamp_scroll ~view_h m m.scroll in
-  List.init view_h (fun i ->
-      let idx = scroll + i in
-      if idx < count then output_line ~ansi:m.ansi ~w m.lines.(idx)
-      else [ (Out_text, String.make w ' ') ])
+  if not m.wrap then
+    List.init view_h (fun i ->
+        let idx = scroll + i in
+        if idx < count then output_line ~ansi:m.ansi ~w m.lines.(idx)
+        else [ (Out_text, String.make w ' ') ])
+  else begin
+    let buf = ref [] and n = ref 0 in
+    let i = ref scroll in
+    while !n < view_h && !i < count do
+      List.iter
+        (fun row ->
+          if !n < view_h then begin
+            buf := row :: !buf;
+            incr n
+          end)
+        (output_line_rows ~ansi:m.ansi ~wrap:true ~w m.lines.(!i));
+      incr i
+    done;
+    while !n < view_h do
+      buf := [ (Out_text, String.make w ' ') ] :: !buf;
+      incr n
+    done;
+    List.rev !buf
+  end
 
 (* The lens/hint pane column: one section per pane, top to bottom, equal
    heights with the last section absorbing the remainder. Each section is a
