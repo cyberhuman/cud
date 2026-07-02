@@ -1314,6 +1314,87 @@ let wrap_tests () =
   | (Render.Ansi _, "rr") :: _ -> ()
   | _ -> fail "wrap.ansi-row1" "unexpected segment structure")
 
+(* --- Input line wrapping (-W) --- *)
+
+let wrap_input_tests () =
+  let has hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i + 1)) in
+    nl = 0 || go 0
+  in
+  let inp ?w m i =
+    match Model.handle_input ?w ~view_h:5 m i with
+    | Model.Continue (m', _) -> m'
+    | _ -> m
+  in
+  (* the args line wraps under the prompt instead of scrolling *)
+  let m =
+    Model.create ~wrap_input:true ~cmd:"jq" ~fixed_args:[]
+      ~initial:"abcdefghijkl" ()
+  in
+  let frame = Render.render ~w:10 ~h:6 m in
+  let rows = Render.to_strings frame in
+  check_str "wi.row0" "jq> abcdef" (List.nth rows 0);
+  check_str "wi.row1" "ghijkl" (String.trim (List.nth rows 1));
+  check "wi.cursor" (frame.Render.cursor = Some (6, 1));
+  check_int "wi.input-height" 2 (Render.input_height ~w:10 ~h:9 m);
+  (* without the flag the same line scrolls horizontally on one row *)
+  let off = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"abcdefghijkl" () in
+  check_int "wi.off-height" 1 (Render.input_height ~w:10 ~h:9 off);
+  check "wi.off-cursor" ((Render.render ~w:10 ~h:6 off).Render.cursor = Some (9, 0));
+
+  (* text ending exactly at the edge: the cursor gets a blank row *)
+  let b =
+    Model.create ~wrap_input:true ~cmd:"jq" ~fixed_args:[] ~initial:"abcdef" ()
+  in
+  let bframe = Render.render ~w:10 ~h:6 b in
+  check_str "wi.edge-row0" "jq> abcdef" (List.nth (Render.to_strings bframe) 0);
+  check "wi.edge-cursor" (bframe.Render.cursor = Some (0, 1));
+
+  (* Up/Down move by display row within the wrapped line *)
+  let up = inp ~w:10 m (Model.I_special Model.S_up) in
+  check_int "wi.up-display-row" 2 (Editor.cursor (Model.editor up));
+  check_int "wi.down-display-row" 12
+    (Editor.cursor (Model.editor (inp ~w:10 up (Model.I_special Model.S_down))));
+
+  (* Alt-Shift-W toggles input wrapping; Alt-W still toggles the output *)
+  let t1 = inp m (Model.I_meta 'W') in
+  check "wi.toggle-off" (not t1.Model.wrap_input);
+  check "wi.toggle-on" (inp t1 (Model.I_meta 'W')).Model.wrap_input;
+  let t2 = inp m (Model.I_meta 'w') in
+  check "wi.alt-w-is-output-wrap" (t2.Model.wrap && t2.Model.wrap_input);
+  let bar m = List.nth (Render.to_strings (Render.render ~w:40 ~h:4 m)) 3 in
+  check "wi.indicator" (has (bar m) "[wrap-in]");
+  check "wi.indicator-gone" (not (has (bar t1) "[wrap-in]"));
+
+  (* crossing steps by display row, keeping the screen column *)
+  let p =
+    Model.create ~wrap_input:true
+      ~steps:[ ("grep", "abcdefghijklmnop"); ("tr", "xy") ]
+      ~fixed_args:[] ~initial:"" ()
+  in
+  (* starts on step 2 ("tr> xy", cursor at abs 6); step 1 spans 3 display
+     rows at w=10 ("grep> abcd" "efghijklmn" "op") *)
+  let u = inp ~w:10 p (Model.I_special Model.S_up) in
+  check_int "wi.up-crosses" 0 u.Model.cur;
+  check_int "wi.up-cross-cursor" 16 (Editor.cursor (Model.editor u));
+  let d = inp ~w:10 u (Model.I_special Model.S_down) in
+  check_int "wi.down-crosses" 1 d.Model.cur;
+  check_int "wi.down-cross-cursor" 0 (Editor.cursor (Model.editor d));
+
+  (* vim: gk/gj are the same display-row motion *)
+  let v =
+    Model.create ~vim:true ~wrap_input:true ~cmd:"jq" ~fixed_args:[]
+      ~initial:"abcdefghijkl" ()
+  in
+  let vn = inp ~w:10 v (Model.I_special Model.S_escape) in
+  let gk =
+    inp ~w:10
+      (inp ~w:10 vn (Model.I_char (Uchar.of_char 'g')))
+      (Model.I_char (Uchar.of_char 'k'))
+  in
+  check_int "wi.vim-gk" 1 (Editor.cursor (Model.editor gk))
+
 let render_invariants () =
   let base = Model.create ~cmd:"jq" ~fixed_args:[] ~initial:"" () in
   let states =
@@ -1372,6 +1453,14 @@ let render_invariants () =
         scroll = 2;
         status = Some (Model.Exited 0);
       };
+      Model.create ~wrap_input:true ~cmd:"some-long-command" ~fixed_args:[]
+        ~initial:"with a fairly long argument line that wraps around" ();
+      (let m =
+         Model.create ~wrap_input:true ~multiline:true
+           ~steps:[ ("jq", ".aaaaaaaaaaaaaaaaaa\n.b"); ("wc", "-l") ]
+           ~fixed_args:[] ~initial:"" ()
+       in
+       with_lines 10 m);
       (let m =
          Model.create ~wrap:true ~cmd:"jq" ~fixed_args:[] ~initial:""
            ~lenses:[ "head -1" ] ()
@@ -1503,6 +1592,7 @@ let () =
   ansi_tests ();
   ansi_toggle_tests ();
   wrap_tests ();
+  wrap_input_tests ();
   render_invariants ();
   runner_tests ();
   if !failures > 0 then begin

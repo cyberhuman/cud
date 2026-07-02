@@ -33,6 +33,7 @@ type key =
   | Toggle_single
   | Toggle_ansi
   | Toggle_wrap
+  | Toggle_wrap_input
   | Focus_next  (** Tab: move the focus toward the output *)
   | Focus_prev  (** Shift-Tab: move the focus toward the fixed command *)
   | Step_prev  (** focus the previous/next pipeline step ([--pipe]) *)
@@ -80,7 +81,7 @@ type ispecial =
 type input =
   | I_char of Uchar.t  (** printable character, no modifiers *)
   | I_ctrl of char  (** lowercased *)
-  | I_meta of char  (** lowercased *)
+  | I_meta of char  (** case preserved: Alt-W and Alt-Shift-W differ *)
   | I_special of ispecial
 
 type vmode = V_insert | V_normal
@@ -132,6 +133,9 @@ type t = {
   enter_accept : bool;  (** Enter accepts and exits instead of re-running *)
   ansi : bool;  (** respect SGR sequences in the output instead of stripping *)
   wrap : bool;  (** wrap long output lines instead of cropping them *)
+  wrap_input : bool;
+      (** wrap long input lines onto continuation rows instead of
+          scrolling them horizontally *)
   multiline : bool;  (** the args editor holds multiple lines *)
   vmode : vmode;
   vpending : vim_pending;
@@ -194,8 +198,8 @@ let compute_parse_error t =
     [initial]. *)
 let create ?cmd ?placeholder ?(single = false) ?(pipefail = false)
     ?(vim = false) ?(enter_accept = false) ?(ansi = false) ?(wrap = false)
-    ?(multiline = false) ?(lenses = []) ?(hints = []) ?(steps = [])
-    ~fixed_args ~initial () =
+    ?(wrap_input = false) ?(multiline = false) ?(lenses = []) ?(hints = [])
+    ?(steps = []) ~fixed_args ~initial () =
   let mk (fixed_line, init) =
     { fixed = Editor.of_string fixed_line; args = Editor.of_string init }
   in
@@ -233,6 +237,7 @@ let create ?cmd ?placeholder ?(single = false) ?(pipefail = false)
     enter_accept;
     ansi;
     wrap;
+    wrap_input;
     multiline;
     vmode = V_insert;
     vpending = P_none;
@@ -500,9 +505,76 @@ let args_to_visual t vcol =
   let off = if start = 0 then prompt_width t t.cur else 2 in
   set_editor t (with_col ed (max 0 (vcol - off)))
 
+(* The input area's logical rows for [--wrap-input] motion: one entry per
+   args line of every step, with the step index, the position of the line
+   in the step's text, its on-screen offset (prompt or the 2-column
+   indent) and its length. Mirrors the renderer's layout. *)
+let input_logical_rows t =
+  let rows = ref [] in
+  Array.iteri
+    (fun i (st : step) ->
+      let us = Array.of_list (Editor.to_uchars st.args) in
+      let len = Array.length us in
+      let rec go start j =
+        let stop = line_end_of us start in
+        let off = if j = 0 then prompt_width t i else 2 in
+        rows := (i, start, off, stop - start) :: !rows;
+        if stop < len then go (stop + 1) (j + 1)
+      in
+      go 0 0)
+    t.steps;
+  Array.of_list (List.rev !rows)
+
+(* Vertical motion over the wrapped display grid ([--wrap-input]): a
+   logical row spans ceil-many display rows of width [w], and the cursor
+   moves one display row at a time, keeping its screen column — across
+   line and step boundaries alike. *)
+let cursor_disp_move ~w ~view_h ~dir t =
+  let rows = input_logical_rows t in
+  (* display rows a logical row offers to the cursor: positions
+     [0, off+len] spread over rows of [w] columns *)
+  let drows (_, _, off, len) = ((off + len) / w) + 1 in
+  let ci = Editor.cursor (editor t) in
+  let us = Array.of_list (Editor.to_uchars (editor t)) in
+  let lstart = line_start_of us ci in
+  (* the global display row of the cursor, and its screen column *)
+  let gdrow = ref 0 and found = ref false and dcol = ref 0 in
+  Array.iter
+    (fun ((i, start, off, _) as row) ->
+      if not !found then
+        if i = t.cur && start = lstart then begin
+          let abs = off + (ci - start) in
+          gdrow := !gdrow + (abs / w);
+          dcol := abs mod w;
+          found := true
+        end
+        else gdrow := !gdrow + drows row)
+    rows;
+  let total = Array.fold_left (fun n r -> n + drows r) 0 rows in
+  let target = !gdrow + dir in
+  if target < 0 || target >= total then
+    if total > 1 then Continue (t, [])
+    else with_scroll ~view_h t (t.scroll + dir)
+  else begin
+    (* map the target display row back to a step and a text position *)
+    let base = ref 0 and dest = ref None in
+    Array.iter
+      (fun ((_, _, _, _) as row) ->
+        let h = drows row in
+        if !dest = None && target < !base + h then dest := Some (row, target - !base);
+        base := !base + h)
+      rows;
+    match !dest with
+    | None -> Continue (t, [])
+    | Some ((i, start, off, len), k) ->
+        let p = max 0 (min len ((k * w) + !dcol - off)) in
+        let t = { t with cur = i; vpending = P_none } in
+        Continue (set_editor t (Editor.with_cursor t.steps.(i).args (start + p)), [])
+  end
+
 (* --- semantic actions --- *)
 
-let handle_key ~view_h t key =
+let handle_key ?(w = max_int) ~view_h t key =
   let ed = focused t in
   let text_of us =
     let b = Buffer.create 32 in
@@ -551,6 +623,8 @@ let handle_key ~view_h t key =
       Continue ({ t with parse_error = compute_parse_error t }, [ Start_run ])
   | Toggle_ansi -> Continue ({ t with ansi = not t.ansi }, [])
   | Toggle_wrap -> Continue ({ t with wrap = not t.wrap }, [])
+  | Toggle_wrap_input ->
+      Continue ({ t with wrap_input = not t.wrap_input }, [])
   | Step_prev | Step_next ->
       let target =
         let d = if key = Step_next then 1 else -1 in
@@ -568,11 +642,13 @@ let handle_key ~view_h t key =
           Continue (set_focused t (with_col (focused t) col), [])
         else
           let vcol = args_visual_col t in
+          let vcol = if t.wrap_input then vcol mod w else vcol in
           let t = { t with cur = target; focus; vpending = P_none } in
           Continue (args_to_visual t vcol, [])
   | Cursor_up | Cursor_down ->
       let dir = if key = Cursor_down then 1 else -1 in
       if t.focus <> F_args then with_scroll ~view_h t (t.scroll + dir)
+      else if t.wrap_input then cursor_disp_move ~w ~view_h ~dir t
       else
         let moved = if t.multiline then cursor_vert ~dir ed else ed in
         if moved != ed then with_motion t moved
@@ -657,6 +733,7 @@ let emacs_action ~pipe input : key option =
       match c with
       | 'a' -> Some Toggle_ansi
       | 'w' -> Some Toggle_wrap
+      | 'W' -> Some Toggle_wrap_input (* Alt-Shift-W *)
       | 'b' -> Some Word_left
       | 'f' -> Some Word_right
       | _ -> None)
@@ -926,7 +1003,7 @@ let motion_of_char c =
   | '$' -> Some `Dollar
   | _ -> None
 
-let vim_normal ~view_h t input =
+let vim_normal ~w ~view_h t input =
   let ed = focused t in
   let cur = Editor.cursor ed in
   let len = Editor.length ed in
@@ -965,9 +1042,9 @@ let vim_normal ~view_h t input =
       match motion_of_char c with
       | Some m -> vim_apply_op clear_pending ~op m
       | None -> Continue (clear_pending, []))
-  | P_g, _, Some 'g' -> handle_key ~view_h clear_pending Scroll_top
-  | P_g, _, Some 'j' -> handle_key ~view_h clear_pending Cursor_down
-  | P_g, _, Some 'k' -> handle_key ~view_h clear_pending Cursor_up
+  | P_g, _, Some 'g' -> handle_key ~w ~view_h clear_pending Scroll_top
+  | P_g, _, Some 'j' -> handle_key ~w ~view_h clear_pending Cursor_down
+  | P_g, _, Some 'k' -> handle_key ~w ~view_h clear_pending Cursor_up
   | P_z, _, Some 'Z' -> Accept_exit (* ZZ: accept and exit *)
   | P_z, _, Some 'Q' -> Quit_exit (* ZQ: cancel *)
   | (P_replace | P_find _ | P_op _ | P_g | P_z), I_special S_escape, _
@@ -1008,11 +1085,11 @@ let vim_normal ~view_h t input =
       | 'p' -> vim_paste t ~after:true
       | 'P' -> vim_paste t ~after:false
       | 'u' -> vim_undo t
-      | 'j' -> handle_key ~view_h t Scroll_down
-      | 'k' -> handle_key ~view_h t Scroll_up
-      | 'J' -> handle_key ~view_h t Step_next
-      | 'K' -> handle_key ~view_h t Step_prev
-      | 'G' -> handle_key ~view_h t Scroll_bottom
+      | 'j' -> handle_key ~w ~view_h t Scroll_down
+      | 'k' -> handle_key ~w ~view_h t Scroll_up
+      | 'J' -> handle_key ~w ~view_h t Step_next
+      | 'K' -> handle_key ~w ~view_h t Step_prev
+      | 'G' -> handle_key ~w ~view_h t Scroll_bottom
       | 'g' -> Continue ({ t with vpending = P_g }, [])
       | 'Z' -> Continue ({ t with vpending = P_z }, [])
       | _ -> Continue (t, []))
@@ -1020,12 +1097,12 @@ let vim_normal ~view_h t input =
       (* control/special keys keep their emacs meaning in normal mode *)
       match emacs_action ~pipe:(nsteps t > 1) input with
       | Some (Insert _) | None -> Continue (t, [])
-      | Some key -> handle_key ~view_h t key)
+      | Some key -> handle_key ~w ~view_h t key)
 
 (* With the output focused, editing keys are ignored: Up/Down and PgUp/PgDn
    scroll, Shift-Tab moves back, and the global keys (Enter, C-t, C-d, C-c,
    ...) keep working. *)
-let handle_output_focus ~view_h t input =
+let handle_output_focus ~w ~view_h t input =
   match input with
   | I_special S_escape when t.vim ->
       (* Escape never quits in vim mode *)
@@ -1036,22 +1113,23 @@ let handle_output_focus ~view_h t input =
           (( Scroll_up | Scroll_down | Cursor_up | Cursor_down
            | Scroll_output_up | Scroll_output_down
            | Page_up | Page_down | Toggle_single | Toggle_ansi | Toggle_wrap
+           | Toggle_wrap_input
            | Focus_next | Focus_prev | Step_prev | Step_next | Enter | Submit
            | Redraw | Accept | Quit ) as key)
         ->
-          handle_key ~view_h t key
+          handle_key ~w ~view_h t key
       | _ -> Continue (t, []))
 
 (** Entry point for raw input. *)
-let handle_input ~view_h t input =
-  if t.focus = F_output then handle_output_focus ~view_h t input
+let handle_input ?(w = max_int) ~view_h t input =
+  if t.focus = F_output then handle_output_focus ~w ~view_h t input
   else if not t.vim then
     match emacs_action ~pipe:(nsteps t > 1) input with
-    | Some key -> handle_key ~view_h t key
+    | Some key -> handle_key ~w ~view_h t key
     | None -> Continue (t, [])
   else
     match t.vmode with
-    | V_normal -> vim_normal ~view_h t input
+    | V_normal -> vim_normal ~w ~view_h t input
     | V_insert -> (
         match input with
         | I_special S_escape ->
@@ -1062,7 +1140,7 @@ let handle_input ~view_h t input =
             Continue ({ t with vmode = V_normal }, [])
         | _ -> (
             match emacs_action ~pipe:(nsteps t > 1) input with
-            | Some key -> handle_key ~view_h t key
+            | Some key -> handle_key ~w ~view_h t key
             | None -> Continue (t, [])))
 
 (** Mark a new run started; the previous output stays visible until the new

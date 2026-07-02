@@ -21,7 +21,8 @@ let print_args mode args command out_lines =
   | `Output -> List.iter print_endline out_lines
 
 let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~wrap
-    ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail ~output cmdline =
+    ~wrap_input ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail
+    ~output cmdline =
   if (not pipe) && List.length initials > 1 then begin
     prerr_endline "cud: --initial repeated: only meaningful with --pipe";
     124
@@ -51,6 +52,7 @@ let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~wrap
       enter_accept;
       ansi;
       wrap;
+      wrap_input;
       multiline;
       lenses;
       hints;
@@ -212,6 +214,16 @@ let wrap =
           "Wrap long output lines onto continuation rows instead of \
            cropping them at the screen edge. Toggle at runtime with Alt-W.")
 
+let wrap_input =
+  Arg.(
+    value & flag
+    & info [ "W"; "wrap-input" ]
+        ~doc:
+          "Wrap long input lines in the argument editor onto continuation \
+           rows instead of scrolling them horizontally; Up/Down (vim: \
+           gj/gk) then move by display row. Toggle at runtime with \
+           Alt-Shift-W.")
+
 let placeholder =
   Arg.(
     value & opt (some string) None
@@ -274,6 +286,7 @@ let cmd =
     and+ enter_accept
     and+ ansi
     and+ wrap
+    and+ wrap_input
     and+ multiline
     and+ lenses
     and+ hints
@@ -283,7 +296,8 @@ let cmd =
     and+ output
     and+ cmdline in
     run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~wrap
-      ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail ~output cmdline
+      ~wrap_input ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail
+      ~output cmdline
   in
   Cmd.v (Cmd.info "cud" ~doc ~man) term
 

@@ -23,6 +23,7 @@ type opts = {
   enter_accept : bool;  (** Enter accepts and exits *)
   ansi : bool;  (** respect SGR color sequences in the output *)
   wrap : bool;  (** wrap long output lines instead of cropping them *)
+  wrap_input : bool;  (** wrap long input lines instead of scrolling *)
   multiline : bool;  (** multi-line args editor *)
   lenses : string list;  (** [--lens] commands for the second pane *)
   hints : string list;  (** [--hint] commands for the second pane *)
@@ -118,7 +119,8 @@ let input_of_event : Notty.Unescape.event -> Model.input option = function
   | `Key (`ASCII c, mods) when List.mem `Ctrl mods ->
       Some (Model.I_ctrl (Char.lowercase_ascii c))
   | `Key (`ASCII c, mods) when List.mem `Meta mods ->
-      Some (Model.I_meta (Char.lowercase_ascii c))
+      (* case preserved: Alt-W and Alt-Shift-W are distinct bindings *)
+      Some (Model.I_meta c)
   | `Key (`ASCII c, _) -> Some (Model.I_char (Uchar.of_char c))
   | `Key (`Uchar u, mods) when not (List.mem `Ctrl mods) ->
       Some (Model.I_char u)
@@ -316,9 +318,11 @@ let run (opts : opts) : result Lwt.t =
         match input_of_event event with
         | None -> loop model proc
         | Some input -> (
-            let th = snd (Term.size term) in
-            let view_h = max 1 (th - Render.input_height ~h:th model - 1) in
-            match Model.handle_input ~view_h model input with
+            let tw, th = Term.size term in
+            let view_h =
+              max 1 (th - Render.input_height ~w:tw ~h:th model - 1)
+            in
+            match Model.handle_input ~w:tw ~view_h model input with
             | Model.Quit_exit -> finish proc ~accepted:false model
             | Model.Accept_exit -> finish proc ~accepted:true model
             | Model.Continue (model', effects) ->
@@ -369,8 +373,8 @@ let run (opts : opts) : result Lwt.t =
     Model.create ?cmd:opts.cmd ?placeholder:opts.placeholder ~steps
       ~single:opts.single ~pipefail:opts.pipefail ~vim:opts.vim
       ~enter_accept:opts.enter_accept
-      ~ansi:opts.ansi ~wrap:opts.wrap ~multiline:opts.multiline
-      ~lenses:opts.lenses
+      ~ansi:opts.ansi ~wrap:opts.wrap ~wrap_input:opts.wrap_input
+      ~multiline:opts.multiline ~lenses:opts.lenses
       ~hints:opts.hints ~fixed_args:opts.fixed_args
       ~initial:(Option.value (List.nth_opt opts.initials 0) ~default:"")
       ()

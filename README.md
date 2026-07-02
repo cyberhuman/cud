@@ -75,6 +75,9 @@ Flags:
   output instead of stripping them; other escape sequences are still removed
 - `-w`, `--wrap` — wrap long output lines onto continuation rows instead of
   cropping them at the screen edge
+- `-W`, `--wrap-input` — wrap long input lines in the argument editor onto
+  continuation rows instead of scrolling them horizontally; Up/Down (vim
+  `gj`/`gk`) then move by display row
 - `--lens CMD`, `--hint CMD` — second pane with derived views (see below;
   repeatable)
 - `--vim` — vim keybindings (see below)
@@ -108,8 +111,9 @@ Exit code on accept (Ctrl-D): the last run's exit code (0 on success,
 | C-t | toggle single-argument mode |
 | M-a | toggle ANSI color rendering (`--ansi`) |
 | M-w | toggle output line wrapping (`--wrap`) |
+| M-W (Alt-Shift-W) | toggle input line wrapping (`--wrap-input`) |
 | C-p/C-n | previous/next pipe step (`-p`); otherwise scroll output |
-| Up/Down | move the cursor across input lines and pipe steps (`-M`/`-p`); otherwise scroll output |
+| Up/Down | move the cursor across input lines and pipe steps (`-M`/`-p`), by display row with `-W`; otherwise scroll output |
 | PgUp/PgDn | scroll output |
 | Ctrl/Shift+Up/Down | scroll output (even from the input in `-M`) |
 | C-d | accept: exit 0 and print the arguments |
@@ -228,7 +232,7 @@ mode, shown in the status bar:
   `u`/`C-r` undo/redo
 - output scrolling: `j` `k` `G` `gg` (`-M`: `j`/`k` move across the step's
   input lines instead); `J`/`K` switch pipe steps (`-p`), `gj`/`gk` move
-  vertically across input lines *and* steps
+  vertically across input lines *and* steps — by display row with `-W`
 - Enter re-runs; `ZZ` or C-d accepts; `ZQ` or C-c cancels (Escape never
   quits in vim mode)
 

@@ -751,6 +751,34 @@ let test_wrap () =
   send sess (ctrl 'c');
   expect_exit sess 130
 
+let test_wrap_input () =
+  (* -W: a long argument line wraps onto a continuation row instead of
+     scrolling horizontally *)
+  let sess =
+    spawn "wrap-input"
+      (Printf.sprintf "printf '' | %s -W --debounce 0.05 -- echo" (quote cud))
+  in
+  expect_row sess 0 "echo>";
+  send sess (String.make 100 'a');
+  (* 74 columns follow "echo> "; the remaining 26 land on row 1 *)
+  expect_row sess 0 ("echo> " ^ String.make 74 'a');
+  expect_row sess 1 (String.make 26 'a');
+  expect_cursor sess (26, 1);
+  expect_status sess "[wrap-in]";
+  (* Up/Down move by display row, keeping the screen column *)
+  send sess up;
+  expect_cursor sess (26, 0);
+  send sess down;
+  expect_cursor sess (26, 1);
+  (* Alt-Shift-W: back to the horizontally scrolled single row *)
+  send sess "\x1bW";
+  expect_cursor sess (79, 0);
+  expect_no_status sess "[wrap-in]";
+  send sess "\x1bW";
+  expect_cursor sess (26, 1);
+  send sess (ctrl 'c');
+  expect_exit sess 130
+
 let test_multiline () =
   (* a 30-element array so the output is taller than the viewport *)
   let big_json =
@@ -1076,6 +1104,7 @@ let () =
       ("ansi", test_ansi);
       ("no-ansi", test_no_ansi);
       ("wrap", test_wrap);
+      ("wrap-input", test_wrap_input);
       ("multiline", test_multiline);
       ("ml-enter-accept", test_multiline_enter_accept);
       ("ctrl-o-submit", test_ctrl_o_submit);

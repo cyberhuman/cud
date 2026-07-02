@@ -342,18 +342,6 @@ let args_lines_of (m : Model.t) ed =
     String.split_on_char '\n' (Editor.to_string ed) |> List.map sanitize_flat
   else [ sanitize_flat (Editor.to_string ed) ]
 
-(** Rows taken by the input area: one block per pipeline step, each the
-    number of its args lines; the total is clamped to a third of the screen
-    (and always at least one), so at least one output row and the status bar
-    survive. *)
-let input_height ~h (m : Model.t) =
-  let total =
-    Array.fold_left
-      (fun acc (st : Model.step) ->
-        acc + List.length (args_lines_of m st.Model.args))
-      0 m.Model.steps
-  in
-  if total <= 1 then 1 else min total (max 1 (h / 3))
 
 (* (line, column) of character position [cur] within [lines] (lines are
    separated by one '\n' character each). *)
@@ -372,14 +360,18 @@ let cursor_line_col lines cur =
      CMD [SP fixed-args] "> " args-line-0
      "  " args-line-1
      ...
-   Each step's fixed-args region is editable too (Tab moves the cursor
-   there) and lives on the step's first row. The row holding the cursor
-   scrolls horizontally to keep it visible; the whole area is clamped to
-   [input_height] rows and scrolls vertically to keep the cursor row
-   visible. *)
-let input_area ~w ~h (m : Model.t) =
+   Each step's fixed-args region is editable too (Shift-Tab moves the
+   cursor there) and lives on the step's first row. The row holding the
+   cursor scrolls horizontally to keep it visible — or, with
+   [--wrap-input], every logical row wraps onto continuation rows. The
+   whole area is clamped to [input_height] rows and scrolls vertically to
+   keep the cursor row visible. *)
+
+(* All input display rows (each exactly [w] columns) and the cursor's
+   (row, column) among them. *)
+let input_rows ~w (m : Model.t) =
   let cursor = ref (0, 0) in
-  (* absolute (row, column) before scrolling *)
+  (* logical (row, absolute column) *)
   let rows_rev = ref [] in
   let nrows = ref 0 in
   Array.iteri
@@ -429,23 +421,59 @@ let input_area ~w ~h (m : Model.t) =
           incr nrows)
         lines)
     m.Model.steps;
-  let all_rows = Array.of_list (List.rev !rows_rev) in
-  let total = Array.length all_rows in
-  let input_h = input_height ~h m in
-  let cursor_row, cursor_abs = !cursor in
-  let vscroll = max 0 (min (total - input_h) (cursor_row - input_h + 1)) in
-  let rows =
-    List.init input_h (fun i ->
-        let ri = vscroll + i in
-        let hscroll =
-          if ri = cursor_row && cursor_abs >= w then cursor_abs - w + 1 else 0
+  let logical = Array.of_list (List.rev !rows_rev) in
+  let lrow, abs = !cursor in
+  if not m.Model.wrap_input then
+    (* the cursor row slides horizontally to keep the cursor on screen *)
+    let hscroll = if abs < w then 0 else abs - w + 1 in
+    let rows =
+      Array.mapi
+        (fun i parts ->
+          window_parts ~w ~hscroll:(if i = lrow then hscroll else 0) parts)
+        logical
+    in
+    (rows, (lrow, min (abs - hscroll) (max 0 (w - 1))))
+  else begin
+    (* every logical row wraps onto as many display rows as it needs *)
+    let rows = ref [] and n = ref 0 in
+    let crow = ref 0 and ccol = ref 0 in
+    Array.iteri
+      (fun i parts ->
+        let chunks = wrap_segs ~pad:Input w parts in
+        let chunks =
+          (* the cursor can sit just past text ending exactly at the edge:
+             give it a blank row to live on *)
+          if i = lrow && abs > 0 && abs mod w = 0 && abs / w >= List.length chunks
+          then chunks @ [ [ (Input, String.make w ' ') ] ]
+          else chunks
         in
-        window_parts ~w ~hscroll all_rows.(ri))
-  in
-  let hscroll = if cursor_abs < w then 0 else cursor_abs - w + 1 in
-  let cx = min (cursor_abs - hscroll) (max 0 (w - 1)) in
-  let cyv = max 0 (min (input_h - 1) (cursor_row - vscroll)) in
-  (rows, (cx, cyv))
+        if i = lrow then begin
+          crow := !n + (abs / w);
+          ccol := abs mod w
+        end;
+        List.iter
+          (fun r ->
+            rows := r :: !rows;
+            incr n)
+          chunks)
+      logical;
+    (Array.of_list (List.rev !rows), (!crow, !ccol))
+  end
+
+(** Rows taken by the input area: the display rows of every step, clamped
+    to a third of the screen (and always at least one), so at least one
+    output row and the status bar survive. *)
+let input_height ~w ~h (m : Model.t) =
+  let total = Array.length (fst (input_rows ~w m)) in
+  if total <= 1 then 1 else min total (max 1 (h / 3))
+
+let input_area ~w ~h (m : Model.t) =
+  let rows, (crow, ccol) = input_rows ~w m in
+  let total = Array.length rows in
+  let input_h = if total <= 1 then 1 else min total (max 1 (h / 3)) in
+  let vscroll = max 0 (min (total - input_h) (crow - input_h + 1)) in
+  ( List.init input_h (fun i -> rows.(vscroll + i)),
+    (ccol, max 0 (min (input_h - 1) (crow - vscroll))) )
 
 let status_row ~w ~view_h (m : Model.t) =
   let state =
@@ -493,6 +521,7 @@ let status_row ~w ~view_h (m : Model.t) =
   let mode = if m.single then " [1 arg] " else "" in
   let ansi_ind = if m.ansi then " [ansi] " else "" in
   let wrap_ind = if m.wrap then " [wrap] " else "" in
+  let wrapin_ind = if m.wrap_input then " [wrap-in] " else "" in
   let step_ind =
     let n = Model.nsteps m in
     if n > 1 then Printf.sprintf " [%d/%d] " (m.Model.cur + 1) n else ""
@@ -506,8 +535,8 @@ let status_row ~w ~view_h (m : Model.t) =
   let hints = "enter run · ^D accept · esc quit " in
   let leftw =
     ulength vim_mode + ulength state + ulength parse + ulength mode
-    + ulength ansi_ind + ulength wrap_ind + ulength step_ind
-    + ulength focus_ind
+    + ulength ansi_ind + ulength wrap_ind + ulength wrapin_ind
+    + ulength step_ind + ulength focus_ind
   in
   (* Right-hand side: drop the hints, then the range, as space runs out. *)
   let right =
@@ -526,6 +555,7 @@ let status_row ~w ~view_h (m : Model.t) =
         (Bar, mode);
         (Bar, ansi_ind);
         (Bar, wrap_ind);
+        (Bar, wrapin_ind);
         (Bar, step_ind);
         (Bar, focus_ind);
         (Bar, String.make mid ' ' ^ right);
