@@ -88,11 +88,11 @@ let pipe =
         ~doc:
           "Build a shell pipeline: every positional argument is one step's \
            command line (quote steps that have fixed arguments), each with \
-           its own prompt and editable arguments, stacked at the top. Switch \
-           between steps with Ctrl-P/Ctrl-N (vim normal mode: J/K); Up/Down \
-           (vim: gj/gk) also cross into the neighbouring step, keeping the \
-           on-screen cursor column. A step left empty drops out of the \
-           pipeline.")
+           its own prompt and editable arguments, stacked at the top. The \
+           last step starts focused; switch between steps with \
+           Ctrl-P/Ctrl-N (vim normal mode: J/K); Up/Down (vim: gj/gk) also \
+           cross into the neighbouring step, keeping the on-screen cursor \
+           column. A step left empty drops out of the pipeline.")
 
 let pipefail =
   Arg.(

@@ -930,9 +930,14 @@ let test_pipe () =
   expect_row sess 2 "FOO";
   expect_row sess 3 "BOO";
   expect_status sess "exit 0";
+  (* the last step starts focused, cursor at the end of its args *)
+  expect_status sess "[2/2]";
+  expect_cursor sess (11, 1);
+  (* C-p focuses the first step; C-n comes back, keeping the on-screen
+     cursor column *)
+  send sess (ctrl 'p');
   expect_status sess "[1/2]";
   expect_cursor sess (7, 0);
-  (* C-n focuses the next step, keeping the on-screen cursor column *)
   send sess (ctrl 'n');
   expect_status sess "[2/2]";
   expect_cursor sess (7, 1);

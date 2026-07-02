@@ -891,20 +891,20 @@ let pipe_tests () =
   check_str "pipe.command_string" "grep o | tr a-z A-Z"
     (Model.command_string m);
 
+  (* the last step starts focused; C-p/C-n switch and clamp at the ends *)
+  check_int "pipe.starts-on-last" 1 m.Model.cur;
+  check_int "pipe.ctrl-n-clamp" 1 (inp m (Model.I_ctrl 'n')).Model.cur;
+  let p1 = inp m (Model.I_ctrl 'p') in
+  check_int "pipe.ctrl-p" 0 p1.Model.cur;
+  check_int "pipe.ctrl-p-clamp" 0 (inp p1 (Model.I_ctrl 'p')).Model.cur;
+  check_int "pipe.ctrl-n" 1 (inp p1 (Model.I_ctrl 'n')).Model.cur;
+
   (* typing edits the current step only *)
-  let m1 = inp m (Model.I_char (Uchar.of_char '-')) in
+  let m1 = inp p1 (Model.I_char (Uchar.of_char '-')) in
   let m1 = inp m1 (Model.I_char (Uchar.of_char 'v')) in
   check "pipe.edit-first-step"
     (Model.command m1 = Ok (Some ("sh", [ "-c"; "grep o -v | tr a-z A-Z" ])));
-
-  (* C-n switches to the next step, C-p back; both clamp at the ends *)
-  let n1 = inp m (Model.I_ctrl 'n') in
-  check_int "pipe.ctrl-n" 1 n1.Model.cur;
-  check_int "pipe.ctrl-n-clamp" 1 (inp n1 (Model.I_ctrl 'n')).Model.cur;
-  let p1 = inp n1 (Model.I_ctrl 'p') in
-  check_int "pipe.ctrl-p" 0 p1.Model.cur;
-  check_int "pipe.ctrl-p-clamp" 0 (inp p1 (Model.I_ctrl 'p')).Model.cur;
-  let n1x = inp n1 (Model.I_char (Uchar.of_char 'x')) in
+  let n1x = inp m (Model.I_char (Uchar.of_char 'x')) in
   check "pipe.edit-second-step"
     (Model.command n1x = Ok (Some ("sh", [ "-c"; "grep o | tr a-z A-Z x" ])));
 
@@ -951,7 +951,7 @@ let pipe_tests () =
   (* switching steps preserves the on-screen cursor column: "grep> " and
      "tr> " have different widths, so the text column shifts by the
      difference (and clamps into the line) *)
-  let sc = mk [ ("grep", "abcdef"); ("tr", "xy") ] in
+  let sc = inp (mk [ ("grep", "abcdef"); ("tr", "xy") ]) (Model.I_ctrl 'p') in
   let sc = Model.set_editor sc (Editor.with_cursor (Model.editor sc) 4) in
   (* screen 10 = "grep> " (6) + 4; on "tr> " that is text column 6 -> clamp *)
   let sn = inp sc (Model.I_ctrl 'n') in
@@ -986,6 +986,7 @@ let pipe_tests () =
       ~steps:[ ("jq", ".a\n.bb"); ("wc", "-l") ]
       ~fixed_args:[] ~initial:"" ()
   in
+  let mml = inp mml (Model.I_ctrl 'p') in
   let w1 = key mml Model.Cursor_up in
   check_int "pipe.ml-up-within" 0 w1.Model.cur;
   check_int "pipe.ml-up-within-cursor" 2 (Editor.cursor (Model.editor w1));
@@ -1006,13 +1007,13 @@ let pipe_tests () =
       ~fixed_args:[] ~initial:"" ()
   in
   let vn = inp v (Model.I_special Model.S_escape) in
-  let vj = inp vn (Model.I_char (Uchar.of_char 'J')) in
-  check_int "pipe.vim-J" 1 vj.Model.cur;
-  check_int "pipe.vim-K" 0 (inp vj (Model.I_char (Uchar.of_char 'K'))).Model.cur;
+  let vk = inp vn (Model.I_char (Uchar.of_char 'K')) in
+  check_int "pipe.vim-K" 0 vk.Model.cur;
+  check_int "pipe.vim-J" 1 (inp vk (Model.I_char (Uchar.of_char 'J'))).Model.cur;
   (* gj/gk are the cross-step vertical motion; j/k stay within the step
      (they scroll in single-line mode) *)
   let gj =
-    inp (inp vn (Model.I_char (Uchar.of_char 'g'))) (Model.I_char (Uchar.of_char 'j'))
+    inp (inp vk (Model.I_char (Uchar.of_char 'g'))) (Model.I_char (Uchar.of_char 'j'))
   in
   check_int "pipe.vim-gj" 1 gj.Model.cur;
   check_int "pipe.vim-gk" 0
@@ -1021,7 +1022,7 @@ let pipe_tests () =
   let vlines = with_lines 30 vn in
   let vjj = inp vlines (Model.I_char (Uchar.of_char 'j')) in
   check_int "pipe.vim-j-scrolls" 1 vjj.Model.scroll;
-  check_int "pipe.vim-j-stays" 0 vjj.Model.cur;
+  check_int "pipe.vim-j-stays" 1 vjj.Model.cur;
 
   (* render: one prompt row per step, cursor on the focused step, step
      indicator in the status bar *)
@@ -1037,15 +1038,16 @@ let pipe_tests () =
   check_str "pipe.render-step0" "grep o> x" (String.trim (List.nth rows 0));
   check_str "pipe.render-step1" "sort>" (String.trim (List.nth rows 1));
   check_str "pipe.render-output" "hit" (String.trim (List.nth rows 2));
-  check "pipe.render-cursor" (frame.Render.cursor = Some (9, 0));
-  check "pipe.step-indicator" (contains (List.nth rows 5) "[1/2]");
-  let r2 = inp r (Model.I_ctrl 'n') in
-  let frame2 = Render.render ~w:22 ~h:6 r2 in
-  check "pipe.render-cursor-step1" (frame2.Render.cursor = Some (6, 1));
-  check "pipe.step-indicator-2"
-    (contains (List.nth (Render.to_strings frame2) 5) "[2/2]");
+  (* the last step starts focused *)
+  check "pipe.render-cursor" (frame.Render.cursor = Some (6, 1));
+  check "pipe.step-indicator" (contains (List.nth rows 5) "[2/2]");
+  let r0 = inp r (Model.I_ctrl 'p') in
+  let frame2 = Render.render ~w:22 ~h:6 r0 in
+  check "pipe.render-cursor-step0" (frame2.Render.cursor = Some (8, 0));
+  check "pipe.step-indicator-0"
+    (contains (List.nth (Render.to_strings frame2) 5) "[1/2]");
   (* a screen too small for every step scrolls the input to the cursor *)
-  let small = Render.render ~w:22 ~h:5 r2 in
+  let small = Render.render ~w:22 ~h:5 r in
   check_str "pipe.render-scrolled" "sort>"
     (String.trim (List.nth (Render.to_strings small) 0));
   check "pipe.render-scrolled-cursor" (small.Render.cursor = Some (6, 0))

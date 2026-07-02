@@ -213,7 +213,9 @@ let create ?cmd ?placeholder ?(single = false) ?(pipefail = false)
   let t =
   {
     steps;
-    cur = 0;
+    (* a pipeline is usually refined at its end: the last step starts
+       focused *)
+    cur = Array.length steps - 1;
     focus = F_args;
     placeholder;
     lines = [||];

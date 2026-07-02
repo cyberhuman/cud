@@ -137,11 +137,12 @@ ps aux | cud -p -- 'grep ssh' 'wc -l'
 
 Quote a step that has fixed arguments (it is one `CMD` argument, split
 shell-style once inside); a step given as an empty string — or emptied at
-runtime — simply drops out of the pipeline. Ctrl-P/Ctrl-N move the cursor
+runtime — simply drops out of the pipeline. The last step starts focused —
+a pipeline is usually refined at its end. Ctrl-P/Ctrl-N move the cursor
 between the steps (`J`/`K` in vim normal mode), keeping its on-screen
 column; Up/Down (vim `gj`/`gk`) do the same vertically — through the lines
 of a multiline step first, then on into the neighbouring step. The status
-bar shows which step is current (`[1/2]`). Tab, single-argument mode, `-I`
+bar shows which step is current (`[2/2]`). Tab, single-argument mode, `-I`
 and everything else work per step. Repeat `-i` to seed several steps:
 
 ```
