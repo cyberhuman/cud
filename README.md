@@ -124,6 +124,8 @@ ps aux | cud -p -- 'grep ssh' 'wc -l'
 └──────────────────────────────────────────────┘
 ```
 
+![cud pipe demo: a grep | tr pipeline, each step edited in place, Ctrl-N/Ctrl-P switching between them](demo-pipe.gif)
+
 Quote a step that has fixed arguments (it is one `CMD` argument, split
 shell-style once inside); a step given as an empty string — or emptied at
 runtime — simply drops out of the pipeline. Ctrl-P/Ctrl-N move the cursor
