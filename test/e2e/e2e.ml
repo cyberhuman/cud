@@ -571,6 +571,38 @@ let test_no_stdin () =
   send sess (ctrl 'c');
   expect_exit sess 130
 
+let test_input_file () =
+  (* -f FILE feeds the file to the command — even with stdin a tty *)
+  let path = Filename.temp_file "cud-e2e" ".txt" in
+  Out_channel.with_open_bin path (fun oc ->
+      Out_channel.output_string oc "hello\nworld\n");
+  let sess =
+    spawn "input-file"
+      (Printf.sprintf "%s --debounce 0.05 -f %s cat" (quote cud) (quote path))
+  in
+  expect_row sess 0 "cat>";
+  expect_row sess 1 "hello";
+  expect_row sess 2 "world";
+  expect_status sess "exit 0";
+  send sess (ctrl 'c');
+  expect_exit sess 130;
+  (* -f - is stdin, as without the flag *)
+  let sess =
+    spawn "input-file-dash"
+      (Printf.sprintf "printf 'dash\\n' | %s --debounce 0.05 -f - cat"
+         (quote cud))
+  in
+  expect_row sess 1 "dash";
+  send sess (ctrl 'c');
+  expect_exit sess 130;
+  Sys.remove path;
+  (* an unreadable file is reported before the TUI ever starts *)
+  let sess =
+    spawn "input-file-missing"
+      (Printf.sprintf "%s -f %s cat" (quote cud) (quote (path ^ ".missing")))
+  in
+  expect_exit sess 1
+
 let test_accept_exit_code () =
   (* accepting while the last run failed propagates its exit code *)
   let sess =
@@ -1096,6 +1128,7 @@ let () =
       ("no-stdin", test_no_stdin);
       ("placeholder", test_placeholder);
       ("cancel-silent", test_cancel_silent);
+      ("input-file", test_input_file);
       ("accept-exit-code", test_accept_exit_code);
       ("enter-accept", test_enter_accept);
       ("output-on-exit", test_output_on_exit);

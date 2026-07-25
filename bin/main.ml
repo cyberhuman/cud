@@ -20,8 +20,20 @@ let print_args mode args command out_lines =
   | `Command -> print_endline command
   | `Output -> List.iter print_endline out_lines
 
+(* The input replayed to every run: a file with --file, otherwise whatever
+   is piped on stdin ("-" explicitly picks stdin too). No piped stdin means
+   no input at all — the command's stdin is closed instead of reading the
+   user's terminal. *)
+let read_input file =
+  match file with
+  | Some path when path <> "-" ->
+      Some (In_channel.with_open_bin path In_channel.input_all)
+  | Some _ | None ->
+      if Unix.isatty Unix.stdin then None
+      else Some (In_channel.input_all In_channel.stdin)
+
 let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~wrap
-    ~wrap_input ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail
+    ~wrap_input ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail ~file
     ~output cmdline =
   if (not pipe) && List.length initials > 1 then begin
     prerr_endline "cud: --initial repeated: only meaningful with --pipe";
@@ -32,6 +44,11 @@ let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~wrap
     124
   end
   else begin
+  match read_input file with
+  | exception Sys_error msg ->
+      prerr_endline ("cud: " ^ msg);
+      1
+  | input ->
   let cmd, fixed_args =
     match cmdline with [] -> (None, []) | cmd :: rest -> (Some cmd, rest)
   in
@@ -40,6 +57,7 @@ let run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~wrap
   let opts =
     {
       Cud_lib.Tui.cmd;
+      input;
       fixed_args;
       placeholder;
       initials;
@@ -104,6 +122,14 @@ let pipefail =
           "With $(b,--pipe), the pipeline fails if any step fails ($(b,set \
            -o pipefail)) instead of reporting only the last step's exit \
            code.")
+
+let file =
+  Arg.(
+    value & opt (some string) None
+    & info [ "f"; "file" ] ~docv:"FILE" ~absent:"standard input"
+        ~doc:
+          "Read the input to feed the command from $(docv); when $(docv) is \
+           $(b,-), read standard input.")
 
 let manual =
   Arg.(
@@ -255,7 +281,8 @@ let cmd =
         "$(tname) captures its standard input, then runs $(i,CMD) in a \
          full-screen UI: the top line edits extra arguments (appended after \
          the fixed ones), the rest of the screen shows the command's output. \
-         Every run is fed the captured input again.";
+         Every run is fed the captured input again ($(b,--file) captures a \
+         file instead of stdin).";
       `P "Example: $(b,swaymsg -t get_outputs | cud jq)";
       `P
         "With $(b,--pipe) the positional arguments form a shell pipeline, \
@@ -293,11 +320,12 @@ let cmd =
     and+ placeholder
     and+ pipe
     and+ pipefail
+    and+ file
     and+ output
     and+ cmdline in
     run ~initials ~manual ~debounce ~single ~vim ~enter_accept ~ansi ~wrap
       ~wrap_input ~multiline ~lenses ~hints ~placeholder ~pipe ~pipefail
-      ~output cmdline
+      ~file ~output cmdline
   in
   Cmd.v (Cmd.info "cud" ~doc ~man) term
 

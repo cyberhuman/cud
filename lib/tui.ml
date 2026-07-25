@@ -6,6 +6,9 @@ module Term = Notty_lwt.Term
 
 type opts = {
   cmd : string option;  (** [None]: the input line is the whole command *)
+  input : string option;
+      (** the captured data replayed to every run (stdin or [--file]);
+          [None]: no input, the command's stdin is closed right away *)
   fixed_args : string list;
   placeholder : string option;
       (** xargs -I style substitution point in [fixed_args] *)
@@ -48,10 +51,6 @@ type msg =
   | Events_closed
 
 let ( let* ) = Lwt.bind
-
-let read_all_stdin () =
-  if Unix.isatty Unix.stdin then None
-  else Some (In_channel.input_all In_channel.stdin)
 
 (* 256-color palette: 16 named colors, the 6x6x6 cube, the grayscale ramp.
    Truecolor is downscaled to the cube — notty's [A.rgb_888] would emit
@@ -158,7 +157,7 @@ let input_of_event : Notty.Unescape.event -> Model.input option = function
   | _ -> None
 
 let run (opts : opts) : result Lwt.t =
-  let input_data = read_all_stdin () in
+  let input_data = opts.input in
   let tty_unix = Unix.openfile "/dev/tty" [ Unix.O_RDWR ] 0 in
   let tty = Lwt_unix.of_unix_file_descr tty_unix in
   let term = Term.create ~input:tty ~output:tty () in

@@ -56,9 +56,13 @@ line runs via `sh -c`).
 
 When stdin is a terminal (nothing piped), the command's stdin is closed
 immediately, so it reads instant EOF instead of fighting you for the tty.
+With `-f FILE` the captured input comes from a file instead of stdin
+(`-f -` keeps stdin).
 
 Flags:
 
+- `-f FILE`, `--file=FILE` — read the input to feed the command from FILE
+  (when FILE is `-`, read stdin)
 - `-i TEXT`, `--initial=TEXT` — initial contents of the argument line
   (with `-p`, repeat to give each step its initial arguments, in order)
 - `-p`, `--pipe` — every `CMD` argument is one step of a shell pipeline
